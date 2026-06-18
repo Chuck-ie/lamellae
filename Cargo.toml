@@ -1,0 +1,10 @@
+[package]
+name = "lamellae"
+version = "0.1.0"
+edition = "2024"
+description = "A highly optimized SPSC"
+readme = "README.md"
+repository = "https://github.com/Chuck-ie/lamellae"
+license = "MIT"
+
+[dependencies]
