@@ -1,0 +1,7 @@
+error[E0080]: evaluation panicked: Compile Error: Type size cannot be greater than the cache line size (64 bytes)!
+ --> tests/compile_errors/element_size_exceeds_cache_line_fails.rs:4:13
+  |
+4 |     let _ = channel!([u8; 65], 4);
+  |             ^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed here
+  |
+  = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)

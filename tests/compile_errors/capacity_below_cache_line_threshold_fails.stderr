@@ -1,0 +1,7 @@
+error[E0080]: evaluation panicked: Compile Error: Capacity is too small! It must be at least four times the elements per cache line.
+ --> tests/compile_errors/capacity_below_cache_line_threshold_fails.rs:4:13
+  |
+4 |     let _ = channel!(usize, 2);
+  |             ^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed here
+  |
+  = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)

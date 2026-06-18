@@ -1,4 +1,4 @@
-mod buffer;
+pub mod buffer;
 pub mod consumer;
 pub mod producer;
 pub mod reservation;

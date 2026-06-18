@@ -22,7 +22,7 @@ pub struct Buffer<T, const N: usize> {
 }
 
 impl<T, const N: usize> Buffer<T, N> {
-    #[allow(dead_code)]
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> (Producer<T, N>, Consumer<T, N>) {
         let cache_lines = capacity / N;
         let inner: Box<[CacheLine<T, N>]> =
@@ -49,7 +49,7 @@ impl<T, const N: usize> Buffer<T, N> {
     }
 
     // # Safety: the caller has to make sure that index is within bounds of the buffer
-    pub unsafe fn get_cache_line(&self, index: usize) -> &CacheLine<T, N> {
+    pub(crate) unsafe fn get_cache_line(&self, index: usize) -> &CacheLine<T, N> {
         unsafe { self.inner.get_unchecked(index) }
     }
 }

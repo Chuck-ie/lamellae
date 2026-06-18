@@ -8,3 +8,14 @@ repository = "https://github.com/Chuck-ie/lamellae"
 license = "MIT"
 
 [dependencies]
+
+[dev-dependencies]
+trybuild = "1.0"
+
+[[test]]
+name = "channel_init_tests"
+path = "tests/channel_init_tests.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
