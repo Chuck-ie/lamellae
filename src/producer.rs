@@ -1,7 +1,4 @@
-use std::{
-    ptr,
-    sync::{Arc, atomic::Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
 use crate::{buffer::Buffer, reservation::SendReservation, spinlock::Spinlock};
 
@@ -133,15 +130,15 @@ impl<T, const N: usize> Producer<T, N> {
 
         if to_abs_index < last_abs_index {
             let s_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            unsafe { ptr::copy_nonoverlapping(buf.as_ptr(), s_ptr, batch_size) };
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), s_ptr, batch_size) };
         } else {
             let s1_len = last_abs_index - from_abs_index;
             let s1_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            unsafe { ptr::copy_nonoverlapping(buf.as_ptr(), s1_ptr, s1_len) };
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), s1_ptr, s1_len) };
 
             let s2_len = batch_size - s1_len;
             let s2_ptr = unsafe { self.get_slice_ptr(0, 0) };
-            unsafe { ptr::copy_nonoverlapping(buf.as_ptr().add(s1_len), s2_ptr, s2_len) };
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr().add(s1_len), s2_ptr, s2_len) };
         }
 
         let final_abs_index = to_abs_index % self.buffer.capacity;
@@ -257,12 +254,21 @@ impl<T, const N: usize> Producer<T, N> {
 
     #[inline]
     fn free_slots(&self) -> usize {
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
+        // [CL0, CL1, CL2, CL3]
+        // writer: cl_index=2, cl_offset=N
+        // reader: cl_index=3, cl_offset=N
+        // -> free_cache_lines = (3 - 2) & mask -> 1
+        let head_cl_index = self.cl_index;
+        let head_cl_offset = self.cl_offset;
         let tail_cl_index = self.buffer.tail.load(Ordering::Acquire);
 
-        let free_cache_lines = tail_cl_index.wrapping_sub(curr_cl_index) & self.buffer.cl_mask;
-        (free_cache_lines * N).saturating_sub(N - curr_cl_offset)
+        let free_cache_lines =
+            tail_cl_index.wrapping_sub(head_cl_index).wrapping_sub(1) & self.buffer.cl_mask;
+
+        let free_slots_total = free_cache_lines * N;
+        let free_slots_curr_cl = N - head_cl_offset;
+
+        free_slots_total + free_slots_curr_cl
     }
 
     // # Safety: the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset

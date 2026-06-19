@@ -1,40 +1,48 @@
+#![no_std]
+
 use lamellae::channel;
+
+/// the capacity of ``TestMessages`` per cache line
+const CL_CAPACITY: usize = 8;
+const TOTAL_CAPACITY: usize = 4 * CL_CAPACITY;
+const MAX_WRITEABLE_SLOTS: usize = TOTAL_CAPACITY - CL_CAPACITY;
+
+type TestMessage = usize;
 
 const fn assert_send<T: Send>(_: &T) {}
 
 #[test]
-fn test_consumer_is_send() {
-    let (_, rx) = channel!(u64, 32);
-    assert_send(&rx);
-}
-
-#[test]
 fn test_producer_is_send() {
-    let (tx, _) = channel!(u64, 32);
+    let (tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
     assert_send(&tx);
 }
 
 #[test]
-fn test_try_send_recv_lazy_wrap() {
-    const MESSAGES: u64 = 8;
-    let (mut tx, mut rx) = channel!(u64, 32);
+fn test_consumer_is_send() {
+    let (_, rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    assert_send(&rx);
+}
 
-    for i in 0..MESSAGES {
+#[test]
+fn test_try_send_recv_lazy_wrap() {
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+    for i in 0..CL_CAPACITY {
         assert!(tx.try_send(i).is_ok());
     }
 
     assert!(rx.try_recv().is_err());
-    assert!(tx.try_send(MESSAGES).is_ok());
+    assert!(tx.try_send(0).is_ok());
 
-    for i in 0..MESSAGES {
+    for i in 0..CL_CAPACITY {
         assert_eq!(Ok(i), rx.try_recv());
     }
 }
 
 #[test]
 fn test_try_send_recv_flush() {
-    const MESSAGE: u64 = 49;
-    let (mut tx, mut rx) = channel!(u64, 32);
+    const MESSAGE: usize = 49;
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
 
     assert!(tx.try_send(MESSAGE).is_ok());
     assert!(rx.try_recv().is_err());
@@ -43,31 +51,195 @@ fn test_try_send_recv_flush() {
 }
 
 #[test]
-fn test_try_send_recv_batch_partial_success() {
-    const BATCH_SIZE: usize = 8;
-    let (mut tx, mut rx) = channel!(u64, 32);
+fn test_try_send_recv_queue_full() {
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+    for i in 0..(TOTAL_CAPACITY - CL_CAPACITY) {
+        assert!(tx.try_send(i).is_ok());
+    }
+
+    assert!(tx.try_send(77).is_err());
+    assert!(rx.try_recv().is_ok());
+    assert!(tx.try_send(49).is_ok());
+}
+
+#[test]
+fn test_try_send_recv_queue_empty() {
+    let (_, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn test_try_send_recv_batch_one_recv() {
+    const BATCH_SIZE: usize = CL_CAPACITY;
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
     let send_buf = [0, 1, 2, 3, 4, 5, 6, 7];
     assert_eq!(send_buf.len(), BATCH_SIZE);
 
     let send_res = tx.try_send_batch(&send_buf);
-    assert!(send_res.is_ok());
     assert_eq!(Ok(BATCH_SIZE), send_res);
 
     let mut recv_buf = [0; BATCH_SIZE];
     assert_ne!(recv_buf, send_buf);
 
     let recv_res = rx.try_recv_batch(&mut recv_buf);
-    assert!(recv_res.is_ok());
     assert_eq!(Ok(BATCH_SIZE), recv_res);
+
     assert_eq!(recv_buf, send_buf);
 }
 
 #[test]
-fn test_try_send_recv_batch_partial_fail() {
-    const BATCH_SIZE: usize = 32;
-    let (mut tx, mut rx) = channel!(u64, BATCH_SIZE);
-    let send_buf = [0; BATCH_SIZE];
+fn test_try_send_recv_batch_mul_recv() {
+    const BATCH_SIZE: usize = CL_CAPACITY;
+    const HALF_BATCH: usize = BATCH_SIZE / 2;
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    let send_buf: [usize; BATCH_SIZE] = core::array::from_fn(|i| i);
+    assert_eq!(send_buf.len(), BATCH_SIZE);
 
     let send_res = tx.try_send_batch(&send_buf);
-    assert_eq!(Ok(BATCH_SIZE / 2), send_res);
+    assert_eq!(Ok(BATCH_SIZE), send_res);
+
+    let mut recv_buf = [0; BATCH_SIZE];
+    assert_ne!(recv_buf, send_buf);
+
+    let recv_res_1 = rx.try_recv_batch(&mut recv_buf[0..HALF_BATCH]);
+    assert_eq!(Ok(HALF_BATCH), recv_res_1);
+
+    let recv_res_2 = rx.try_recv_batch(&mut recv_buf[HALF_BATCH..]);
+    assert_eq!(Ok(HALF_BATCH), recv_res_2);
+
+    assert_eq!(recv_buf, send_buf);
+}
+
+#[test]
+fn test_try_send_recv_batch_partial() {
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    let mut buf = [0; MAX_WRITEABLE_SLOTS - 1];
+
+    assert_eq!(Ok(MAX_WRITEABLE_SLOTS - 1), tx.try_send_batch(&buf));
+    assert_eq!(Ok(1), tx.try_send_batch(&buf));
+    assert_eq!(Ok(MAX_WRITEABLE_SLOTS - 1), rx.try_recv_batch(&mut buf));
+    assert_eq!(Ok(1), rx.try_recv_batch(&mut buf));
+}
+
+#[test]
+fn test_try_send_recv_batch_queue_full() {
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+    for i in 0..MAX_WRITEABLE_SLOTS {
+        assert!(tx.try_send(i).is_ok());
+    }
+
+    assert!(tx.try_send_batch(&[0]).is_err());
+    assert!(rx.try_recv().is_ok());
+    assert!(tx.try_send_batch(&[0]).is_ok());
+}
+
+#[test]
+fn test_try_send_recv_batch_queue_empty() {
+    let (_, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    assert!(rx.try_recv_batch(&mut []).is_err());
+}
+
+#[test]
+fn test_try_send_recv_batch_exact_one_recv() {
+    const BATCH_SIZE: usize = 8;
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    let send_buf: [usize; BATCH_SIZE] = core::array::from_fn(|i| i);
+    assert_eq!(send_buf.len(), BATCH_SIZE);
+
+    let send_res = tx.try_send_batch_exact(&send_buf);
+    assert_eq!(Ok(BATCH_SIZE), send_res);
+
+    let mut recv_buf = [0; BATCH_SIZE];
+    assert_ne!(recv_buf, send_buf);
+
+    let recv_res = rx.try_recv_batch_exact(&mut recv_buf);
+    assert_eq!(Ok(BATCH_SIZE), recv_res);
+
+    assert_eq!(recv_buf, send_buf);
+}
+
+#[test]
+fn test_try_send_recv_batch_exact_mul_recv() {
+    const BATCH_SIZE: usize = 8;
+    const HALF_BATCH: usize = BATCH_SIZE / 2;
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    let send_buf: [usize; BATCH_SIZE] = core::array::from_fn(|i| i);
+    assert_eq!(send_buf.len(), BATCH_SIZE);
+
+    let send_res = tx.try_send_batch_exact(&send_buf);
+    assert_eq!(Ok(BATCH_SIZE), send_res);
+
+    let mut recv_buf = [0; BATCH_SIZE];
+    assert_ne!(recv_buf, send_buf);
+
+    let recv_res_1 = rx.try_recv_batch_exact(&mut recv_buf[0..HALF_BATCH]);
+    assert_eq!(Ok(HALF_BATCH), recv_res_1);
+
+    let recv_res_2 = rx.try_recv_batch_exact(&mut recv_buf[HALF_BATCH..]);
+    assert_eq!(Ok(HALF_BATCH), recv_res_2);
+
+    assert_eq!(recv_buf, send_buf);
+}
+
+#[test]
+fn test_try_send_recv_batch_exact_queue_full() {
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+    for i in 0..MAX_WRITEABLE_SLOTS {
+        assert!(tx.try_send(i).is_ok());
+    }
+
+    assert!(tx.try_send_batch_exact(&[0]).is_err());
+    assert!(rx.try_recv().is_ok());
+    assert!(tx.try_send_batch_exact(&[0]).is_ok());
+}
+
+#[test]
+fn test_try_send_recv_batch_exact_queue_empty() {
+    let (_, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    assert!(rx.try_recv_batch_exact(&mut [0; 1]).is_err());
+}
+
+#[test]
+fn test_producer_try_reserve() {
+    let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+    let mut total_items_sent = 0;
+
+    for i in 0..MAX_WRITEABLE_SLOTS - 1 {
+        assert!(tx.try_send(i).is_ok());
+        total_items_sent += 1;
+    }
+
+    if let Ok(mut reservation) = tx.try_reserve(10) {
+        for i in 0..MAX_WRITEABLE_SLOTS {
+            if total_items_sent < MAX_WRITEABLE_SLOTS {
+                assert!(reservation.send(i).is_some());
+                total_items_sent += 1;
+            } else {
+                assert!(reservation.send(i).is_none());
+            }
+        }
+    } else {
+        panic!("failed to make reservation");
+    }
+
+    for _ in 0..MAX_WRITEABLE_SLOTS - 1 {
+        assert!(rx.try_recv().is_ok());
+        total_items_sent -= 1;
+    }
+
+    if let Ok(mut reservation) = rx.try_reserve(10) {
+        for _ in 0..MAX_WRITEABLE_SLOTS {
+            if total_items_sent > 0 {
+                assert!(reservation.recv().is_some());
+                total_items_sent -= 1;
+            } else {
+                assert!(reservation.recv().is_none());
+            }
+        }
+    } else {
+        panic!("failed to make reservation");
+    }
 }

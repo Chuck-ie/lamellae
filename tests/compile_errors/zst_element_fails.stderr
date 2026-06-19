@@ -1,10 +1,10 @@
-error[E0080]: attempt to divide `64_usize` by zero
+error[E0080]: evaluation panicked: Compile Error: Zero-Sized Types (ZSTs) are not allowed!
  --> tests/compile_errors/zst_element_fails.rs:5:13
   |
 5 |     let _ = channel!(ZST, 5);
-  |             ^^^^^^^^^^^^^^^^ evaluation of `main::ELEMENTS_PER_CACHE_LINE` failed here
+  |             ^^^^^^^^^^^^^^^^ evaluation of `main::VALIDATED_ELEMENT_SIZE` failed here
   |
-  = note: this error originates in the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 note: erroneous constant encountered
  --> tests/compile_errors/zst_element_fails.rs:5:13
@@ -14,13 +14,13 @@ note: erroneous constant encountered
   |
   = note: this note originates in the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0080]: evaluation panicked: Compile Error: Zero-Sized Types (ZSTs) are not allowed!
+note: erroneous constant encountered
  --> tests/compile_errors/zst_element_fails.rs:5:13
   |
 5 |     let _ = channel!(ZST, 5);
-  |             ^^^^^^^^^^^^^^^^ evaluation of `main::_` failed here
+  |             ^^^^^^^^^^^^^^^^
   |
-  = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this note originates in the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 note: erroneous constant encountered
  --> tests/compile_errors/zst_element_fails.rs:5:13

@@ -11,7 +11,7 @@ pub enum Error {
     BatchTooLarge,
 }
 
-pub struct Consumer<T, const N: usize> {
+pub struct Consumer<T, const N: usize, const CLS: usize = 0> {
     pub(crate) buffer: Arc<Buffer<T, N>>,
     pub(crate) cl_index: usize,
     pub(crate) cl_offset: usize,
@@ -103,7 +103,7 @@ impl<T, const N: usize> Consumer<T, N> {
     {
         let max_batch_size = self.buffer.capacity - N;
         let batch_size = buf.len().min(max_batch_size);
-        let final_batch_size = batch_size.min(self.written_items());
+        let final_batch_size = batch_size.min(self.written_slots());
 
         if final_batch_size == 0 {
             return Err(Error::QueueEmpty);
@@ -119,7 +119,7 @@ impl<T, const N: usize> Consumer<T, N> {
         let batch_size = buf.len();
         let max_batch_size = self.buffer.capacity - N;
 
-        if batch_size > max_batch_size || batch_size > self.written_items() {
+        if batch_size > max_batch_size || batch_size > self.written_slots() {
             return Err(Error::BatchTooLarge);
         }
 
@@ -176,7 +176,7 @@ impl<T, const N: usize> Consumer<T, N> {
         T: Copy,
     {
         let max_batch_size = self.buffer.capacity - N;
-        let reservation_size = size.min(max_batch_size).min(self.written_items());
+        let reservation_size = size.min(max_batch_size).min(self.written_slots());
 
         if reservation_size == 0 {
             return Err(Error::QueueEmpty);
@@ -191,7 +191,7 @@ impl<T, const N: usize> Consumer<T, N> {
     {
         let max_batch_size = self.buffer.capacity - N;
 
-        if size > max_batch_size || size > self.written_items() {
+        if size > max_batch_size || size > self.written_slots() {
             return Err(Error::BatchTooLarge);
         }
 
@@ -233,13 +233,40 @@ impl<T, const N: usize> Consumer<T, N> {
     }
 
     #[inline]
-    fn written_items(&self) -> usize {
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
+    fn written_slots(&self) -> usize {
+        // let tail_cl_index = self.cl_index;
+        // let tail_cl_offset = self.cl_offset;
+        // let head_cl_index = self.buffer.head.load(Ordering::Acquire);
+        //
+        // let next_tail_index = tail_cl_index.wrapping_add(1);
+        //
+        // let full_written_cache_lines =
+        //     head_cl_index.wrapping_sub(next_tail_index) & self.buffer.cl_mask;
+        //
+        // let written_items_total = full_written_cache_lines * N;
+        // let written_items_curr_cl = tail_cl_offset;
+        //
+        // written_items_total + written_items_curr_cl
+
+        // [CL0, CL1, CL2, CL3]
+        // writer: cl_index=2, cl_offset=N
+        // reader: cl_index=3, cl_offset=N
+        let tail_cl_index = self.cl_index;
+        let tail_cl_offset = self.cl_offset;
         let head_cl_index = self.buffer.head.load(Ordering::Acquire);
 
-        let free_cache_lines = head_cl_index.wrapping_sub(curr_cl_index) & self.buffer.cl_mask;
-        (free_cache_lines * N).saturating_sub(N - curr_cl_offset)
+        let written_items_curr_cl = unsafe { self.buffer.get_write_count(tail_cl_index) };
+
+        let mut written_slots_total = written_items_curr_cl.saturating_sub(tail_cl_offset);
+        let mut i = (tail_cl_index + 1) & self.buffer.cl_mask;
+
+        while i != head_cl_index {
+            written_slots_total += unsafe { self.buffer.get_write_count(i) };
+
+            i = (i + 1) & self.buffer.cl_mask;
+        }
+
+        written_slots_total
     }
 
     // # Safety: the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset

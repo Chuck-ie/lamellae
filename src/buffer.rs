@@ -52,4 +52,9 @@ impl<T, const N: usize> Buffer<T, N> {
     pub(crate) unsafe fn get_cache_line(&self, index: usize) -> &CacheLine<T, N> {
         unsafe { self.inner.get_unchecked(index) }
     }
+
+    // # Safety: the caller has to make sure that index is within bounds of the write counts
+    pub(crate) unsafe fn get_write_count(&self, index: usize) -> usize {
+        unsafe { self.write_counts.get_unchecked(index).get().read() }
+    }
 }

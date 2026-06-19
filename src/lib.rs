@@ -10,10 +10,10 @@ macro_rules! channel {
     ($ty:ty, $capacity:expr) => {{
         // TODO: This 64-byte magic number should ideally be determined based on the target architecture.
         const CACHE_LINE_SIZE: usize = 64;
-        const ELEMENT_SIZE: usize = std::mem::size_of::<$ty>();
+        const ELEMENT_SIZE: usize = core::mem::size_of::<$ty>();
 
         // Validate type size constraints at compile time
-        const _: () = {
+        const VALIDATED_ELEMENT_SIZE: usize = {
             assert!(
                 ELEMENT_SIZE <= CACHE_LINE_SIZE,
                 "Compile Error: Type size cannot be greater than the cache line size (64 bytes)!"
@@ -22,9 +22,11 @@ macro_rules! channel {
                 ELEMENT_SIZE > 0,
                 "Compile Error: Zero-Sized Types (ZSTs) are not allowed!"
             );
+
+            ELEMENT_SIZE
         };
 
-        const ELEMENTS_PER_CACHE_LINE: usize = CACHE_LINE_SIZE / ELEMENT_SIZE;
+        const ELEMENTS_PER_CACHE_LINE: usize = CACHE_LINE_SIZE / VALIDATED_ELEMENT_SIZE;
         const TARGET_CAPACITY: usize = $capacity;
 
         // Validate capacity constraints at compile time

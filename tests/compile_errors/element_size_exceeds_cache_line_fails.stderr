@@ -2,6 +2,30 @@ error[E0080]: evaluation panicked: Compile Error: Type size cannot be greater th
  --> tests/compile_errors/element_size_exceeds_cache_line_fails.rs:4:13
   |
 4 |     let _ = channel!([u8; 65], 4);
-  |             ^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed here
+  |             ^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::VALIDATED_ELEMENT_SIZE` failed here
   |
   = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+ --> tests/compile_errors/element_size_exceeds_cache_line_fails.rs:4:13
+  |
+4 |     let _ = channel!([u8; 65], 4);
+  |             ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this note originates in the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+ --> tests/compile_errors/element_size_exceeds_cache_line_fails.rs:4:13
+  |
+4 |     let _ = channel!([u8; 65], 4);
+  |             ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this note originates in the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: erroneous constant encountered
+ --> tests/compile_errors/element_size_exceeds_cache_line_fails.rs:4:13
+  |
+4 |     let _ = channel!([u8; 65], 4);
+  |             ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this note originates in the macro `channel` (in Nightly builds, run with -Z macro-backtrace for more info)

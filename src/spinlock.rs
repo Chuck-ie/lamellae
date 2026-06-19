@@ -22,7 +22,7 @@ impl Spinlock {
         let spins = 1 << self.spin_count.min(SOFT_LIMIT);
 
         for _ in 0..spins {
-            std::hint::spin_loop();
+            core::hint::spin_loop();
         }
 
         if self.spin_count <= SOFT_LIMIT {
@@ -38,14 +38,15 @@ impl Spinlock {
 
         if self.spin_count <= SOFT_LIMIT {
             for _ in 0..spins {
-                std::hint::spin_loop();
+                core::hint::spin_loop();
             }
         } else {
             for _ in 0..spins {
-                std::hint::spin_loop();
+                core::hint::spin_loop();
             }
 
-            std::thread::yield_now();
+            #[cfg(feature = "std")]
+            ::std::thread::yield_now();
         }
 
         if self.spin_count <= HARD_LIMIT {
