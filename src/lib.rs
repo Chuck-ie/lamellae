@@ -44,3 +44,11 @@ macro_rules! channel {
         $crate::buffer::Buffer::<$ty, ELEMENTS_PER_CACHE_LINE>::with_capacity(TARGET_CAPACITY)
     }};
 }
+
+// #[cfg(test)]
+// mod unit_tests {
+//     #[test]
+//     fn test_advance_cl_offset() {
+//         let (_, mut rx) = channel!(usize, 32);
+//     }
+// }

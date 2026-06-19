@@ -45,8 +45,7 @@ impl Spinlock {
                 core::hint::spin_loop();
             }
 
-            #[cfg(feature = "std")]
-            ::std::thread::yield_now();
+            std::thread::yield_now();
         }
 
         if self.spin_count <= HARD_LIMIT {

@@ -1,7 +1,4 @@
-use std::{
-    ptr,
-    sync::{Arc, atomic::Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
 use crate::{buffer::Buffer, reservation::RecvReservation, spinlock::Spinlock};
 
@@ -119,8 +116,12 @@ impl<T, const N: usize> Consumer<T, N> {
         let batch_size = buf.len();
         let max_batch_size = self.buffer.capacity - N;
 
-        if batch_size > max_batch_size || batch_size > self.written_slots() {
+        if batch_size > max_batch_size {
             return Err(Error::BatchTooLarge);
+        }
+
+        if batch_size > self.written_slots() {
+            return Err(Error::QueueEmpty);
         }
 
         Ok(unsafe { self.recv_batch_exact_unchecked(buf) })
@@ -141,20 +142,25 @@ impl<T, const N: usize> Consumer<T, N> {
 
         if to_abs_index < last_abs_index {
             let s_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            unsafe { ptr::copy_nonoverlapping(s_ptr, buf.as_mut_ptr(), batch_size) };
+            unsafe { core::ptr::copy_nonoverlapping(s_ptr, buf.as_mut_ptr(), batch_size) };
         } else {
             let s1_len = last_abs_index - from_abs_index;
             let s1_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            unsafe { ptr::copy_nonoverlapping(s1_ptr, buf.as_mut_ptr(), s1_len) };
+            unsafe { core::ptr::copy_nonoverlapping(s1_ptr, buf.as_mut_ptr(), s1_len) };
 
             let s2_len = batch_size - s1_len;
             let s2_ptr = unsafe { self.get_slice_ptr(0, 0) };
-            unsafe { ptr::copy_nonoverlapping(s2_ptr, buf.as_mut_ptr().add(s1_len), s2_len) };
+            unsafe { core::ptr::copy_nonoverlapping(s2_ptr, buf.as_mut_ptr().add(s1_len), s2_len) };
         }
 
         let final_abs_index = to_abs_index % self.buffer.capacity;
-        let next_cl_index = (final_abs_index / N) & self.buffer.cl_mask;
-        let next_cl_offset = final_abs_index % N;
+        let mut next_cl_index = (final_abs_index / N) & self.buffer.cl_mask;
+        let mut next_cl_offset = final_abs_index % N;
+
+        if next_cl_offset == 0 && to_abs_index > 0 {
+            next_cl_index = (next_cl_index.wrapping_sub(1)) & self.buffer.cl_mask;
+            next_cl_offset = N;
+        }
 
         self.cl_index = next_cl_index;
         self.cl_offset = next_cl_offset;
@@ -191,8 +197,12 @@ impl<T, const N: usize> Consumer<T, N> {
     {
         let max_batch_size = self.buffer.capacity - N;
 
-        if size > max_batch_size || size > self.written_slots() {
+        if size > max_batch_size {
             return Err(Error::BatchTooLarge);
+        }
+
+        if size > self.written_slots() {
+            return Err(Error::QueueEmpty);
         }
 
         Ok(unsafe { self.reserve_exact_unchecked(size) })
@@ -234,35 +244,16 @@ impl<T, const N: usize> Consumer<T, N> {
 
     #[inline]
     fn written_slots(&self) -> usize {
-        // let tail_cl_index = self.cl_index;
-        // let tail_cl_offset = self.cl_offset;
-        // let head_cl_index = self.buffer.head.load(Ordering::Acquire);
-        //
-        // let next_tail_index = tail_cl_index.wrapping_add(1);
-        //
-        // let full_written_cache_lines =
-        //     head_cl_index.wrapping_sub(next_tail_index) & self.buffer.cl_mask;
-        //
-        // let written_items_total = full_written_cache_lines * N;
-        // let written_items_curr_cl = tail_cl_offset;
-        //
-        // written_items_total + written_items_curr_cl
-
-        // [CL0, CL1, CL2, CL3]
-        // writer: cl_index=2, cl_offset=N
-        // reader: cl_index=3, cl_offset=N
         let tail_cl_index = self.cl_index;
         let tail_cl_offset = self.cl_offset;
         let head_cl_index = self.buffer.head.load(Ordering::Acquire);
 
         let written_items_curr_cl = unsafe { self.buffer.get_write_count(tail_cl_index) };
-
         let mut written_slots_total = written_items_curr_cl.saturating_sub(tail_cl_offset);
         let mut i = (tail_cl_index + 1) & self.buffer.cl_mask;
 
         while i != head_cl_index {
             written_slots_total += unsafe { self.buffer.get_write_count(i) };
-
             i = (i + 1) & self.buffer.cl_mask;
         }
 
@@ -281,5 +272,112 @@ impl<T, const N: usize> Consumer<T, N> {
                 .cast::<T>()
                 .cast_const()
         }
+    }
+}
+
+#[cfg(test)]
+mod consumer_tests {
+    use crate::channel;
+    use std::sync::atomic::Ordering;
+
+    const CL_CAPACITY: usize = 8;
+    const TOTAL_CAPACITY: usize = 4 * CL_CAPACITY;
+
+    type TestMessage = usize;
+
+    #[test]
+    fn test_written_slots_one_cl() {
+        let (mut tx, rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert_eq!(rx.written_slots(), 0);
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+        assert_eq!(rx.written_slots(), CL_CAPACITY);
+    }
+
+    #[test]
+    fn test_written_slots_mul_cl() {
+        let (mut tx, rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert_eq!(rx.written_slots(), 0);
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
+        assert!(tx.flush().is_ok());
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert_eq!(rx.written_slots(), CL_CAPACITY);
+    }
+
+    #[test]
+    fn test_wrapping_is_lazy() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert!(tx.try_send_batch(&[0; 2 * CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
+        assert_eq!(rx.cl_index, rx.buffer.tail.load(Ordering::Acquire));
+        let cl_index = rx.cl_index;
+
+        assert_eq!(rx.cl_offset, CL_CAPACITY);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(rx.cl_index, cl_index + 1);
+        assert_eq!(rx.cl_index, rx.buffer.tail.load(Ordering::Acquire));
+        assert_eq!(rx.cl_offset, 1);
+    }
+
+    #[test]
+    fn test_advance_cl_index_forward() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert!(tx.try_send_batch(&[0; 2 * CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
+        let cl_index = rx.cl_index;
+        assert_eq!(rx.cl_offset, CL_CAPACITY);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(rx.cl_index, cl_index + 1);
+        assert_eq!(rx.cl_index, 1);
+    }
+
+    #[test]
+    fn test_advance_cl_index_wrapping() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert!(tx.try_send_batch(&[0; 2 * CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        let cl_index = rx.cl_index;
+        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
+        assert_ne!(rx.cl_index, cl_index);
+        assert!(rx.cl_index < cl_index);
+    }
+
+    #[test]
+    fn test_advance_cl_offset_forward() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+        assert!(tx.try_send_batch(&[0; 2 * CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert!(rx.try_recv().is_ok());
+        let cl_index = rx.cl_index;
+        let cl_offset = rx.cl_offset;
+        assert!(rx.try_recv().is_ok());
+
+        assert_eq!(rx.cl_index, cl_index);
+        assert_eq!(rx.cl_offset, cl_offset + 1);
+    }
+
+    #[test]
+    fn test_advance_cl_offset_wrapping() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+        assert!(tx.try_send_batch(&[0; 2 * CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert_eq!(rx.cl_offset, CL_CAPACITY);
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(rx.cl_offset, 1);
+        assert_ne!(rx.cl_offset, CL_CAPACITY);
     }
 }

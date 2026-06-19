@@ -54,8 +54,13 @@ impl<T, const N: usize> SendReservation<'_, T, N> {
         let to_abs_index = from_abs_index + total_sent;
 
         let final_abs_index = to_abs_index % self.tx.buffer.capacity;
-        let next_cl_index = (final_abs_index / N) & self.tx.buffer.cl_mask;
-        let next_cl_offset = final_abs_index % N;
+        let mut next_cl_index = (final_abs_index / N) & self.tx.buffer.cl_mask;
+        let mut next_cl_offset = final_abs_index % N;
+
+        if next_cl_offset == 0 && to_abs_index > 0 {
+            next_cl_index = (next_cl_index.wrapping_sub(1)) & self.tx.buffer.cl_mask;
+            next_cl_offset = N;
+        }
 
         self.tx.cl_index = next_cl_index;
         self.tx.cl_offset = next_cl_offset;
@@ -117,8 +122,13 @@ impl<T: Copy, const N: usize> RecvReservation<'_, T, N> {
         let to_abs_index = from_abs_index + total_received;
 
         let final_abs_index = to_abs_index % self.rx.buffer.capacity;
-        let next_cl_index = (final_abs_index / N) & self.rx.buffer.cl_mask;
-        let next_cl_offset = final_abs_index % N;
+        let mut next_cl_index = (final_abs_index / N) & self.rx.buffer.cl_mask;
+        let mut next_cl_offset = final_abs_index % N;
+
+        if next_cl_offset == 0 && to_abs_index > 0 {
+            next_cl_index = (next_cl_index.wrapping_sub(1)) & self.rx.buffer.cl_mask;
+            next_cl_offset = N;
+        }
 
         self.rx.cl_index = next_cl_index;
         self.rx.cl_offset = next_cl_offset;
