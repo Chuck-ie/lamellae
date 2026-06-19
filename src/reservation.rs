@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{mem::MaybeUninit, sync::atomic::Ordering};
 
 use crate::{consumer::Consumer, producer::Producer};
 
@@ -74,6 +74,55 @@ impl<T, const N: usize> SendReservation<'_, T, N> {
 
         self.tx.buffer.head.store(next_cl_index, Ordering::Release);
     }
+
+    pub const fn as_mut_slices(
+        &mut self,
+    ) -> (
+        &mut [std::mem::MaybeUninit<T>],
+        &mut [std::mem::MaybeUninit<T>],
+    ) {
+        unsafe {
+            let first =
+                std::slice::from_raw_parts_mut(self.s1.cast::<MaybeUninit<T>>(), self.s1_remaining);
+            let second =
+                std::slice::from_raw_parts_mut(self.s2.cast::<MaybeUninit<T>>(), self.s2_remaining);
+            (first, second)
+        }
+    }
+
+    pub fn send_slice(&mut self, src: &[T]) -> usize
+    where
+        T: Copy,
+    {
+        let to_copy = std::cmp::min(src.len(), self.s1_remaining + self.s2_remaining);
+        if to_copy == 0 {
+            return 0;
+        }
+
+        let mut src_offset = 0;
+
+        if self.s1_remaining > 0 {
+            let c1 = std::cmp::min(to_copy, self.s1_remaining);
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr().add(src_offset), self.s1, c1);
+                self.s1 = self.s1.add(c1);
+            }
+            self.s1_remaining -= c1;
+            src_offset += c1;
+        }
+
+        let remaining = to_copy - src_offset;
+        if remaining > 0 && self.s2_remaining > 0 {
+            let c2 = std::cmp::min(remaining, self.s2_remaining);
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr().add(src_offset), self.s2, c2);
+                self.s2 = self.s2.add(c2);
+            }
+            self.s2_remaining -= c2;
+        }
+
+        to_copy
+    }
 }
 
 pub struct RecvReservation<'a, T: Copy, const N: usize> {
@@ -141,5 +190,45 @@ impl<T: Copy, const N: usize> RecvReservation<'_, T, N> {
         }
 
         self.rx.buffer.tail.store(next_cl_index, Ordering::Release);
+    }
+
+    #[must_use]
+    pub const fn as_slices(&self) -> (&[T], &[T]) {
+        unsafe {
+            let first = std::slice::from_raw_parts(self.s1, self.s1_remaining);
+            let second = std::slice::from_raw_parts(self.s2, self.s2_remaining);
+            (first, second)
+        }
+    }
+
+    pub fn recv_slice(&mut self, dst: &mut [T]) -> usize {
+        let to_copy = std::cmp::min(dst.len(), self.s1_remaining + self.s2_remaining);
+        if to_copy == 0 {
+            return 0;
+        }
+
+        let mut dst_offset = 0;
+
+        if self.s1_remaining > 0 {
+            let c1 = std::cmp::min(to_copy, self.s1_remaining);
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.s1, dst.as_mut_ptr().add(dst_offset), c1);
+                self.s1 = self.s1.add(c1);
+            }
+            self.s1_remaining -= c1;
+            dst_offset += c1;
+        }
+
+        let remaining = to_copy - dst_offset;
+        if remaining > 0 && self.s2_remaining > 0 {
+            let c2 = std::cmp::min(remaining, self.s2_remaining);
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.s2, dst.as_mut_ptr().add(dst_offset), c2);
+                self.s2 = self.s2.add(c2);
+            }
+            self.s2_remaining -= c2;
+        }
+
+        to_copy
     }
 }

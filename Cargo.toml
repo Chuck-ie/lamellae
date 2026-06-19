@@ -11,6 +11,8 @@ license = "MIT"
 
 [dev-dependencies]
 trybuild = "1.0"
+criterion = "0.8"
+rtrb = "0.3"
 
 [[test]]
 name = "channel_init_tests"
@@ -19,3 +21,19 @@ path = "tests/channel_init_tests.rs"
 [[test]]
 name = "integration_tests"
 path = "tests/integration_tests.rs"
+
+[profile.bench]
+debug = true
+strip = false
+opt-level = 3
+codegen-units = 1
+lto = true
+
+[[bench]]
+name = "benches"
+harness = false
+
+
+[[bench]]
+name = "bench_batched"
+harness = false

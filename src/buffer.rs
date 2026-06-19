@@ -12,6 +12,7 @@ use crate::{
 unsafe impl<T: Send, const N: usize> Send for Buffer<T, N> {}
 unsafe impl<T: Sync, const N: usize> Sync for Buffer<T, N> {}
 
+// TODO: replace write_counts with pairs of contigious
 pub struct Buffer<T, const N: usize> {
     pub(crate) head: CachePadded<AtomicUsize>,
     pub(crate) tail: CachePadded<AtomicUsize>,
