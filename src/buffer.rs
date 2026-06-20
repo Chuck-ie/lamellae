@@ -1,11 +1,9 @@
-use std::{
-    cell::UnsafeCell,
-    sync::{Arc, atomic::AtomicUsize},
-};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::{
     consumer::Consumer,
     producer::Producer,
+    slot_tracker::SlotTracker,
     wrapper::{CacheLine, CachePadded},
 };
 
@@ -17,7 +15,7 @@ pub struct Buffer<T, const N: usize> {
     pub(crate) head: CachePadded<AtomicUsize>,
     pub(crate) tail: CachePadded<AtomicUsize>,
     pub(crate) inner: Box<[CacheLine<T, N>]>,
-    pub(crate) write_counts: Box<[UnsafeCell<usize>]>,
+    pub(crate) slot_tracker: SlotTracker<N>,
     pub(crate) cl_mask: usize,
     pub(crate) capacity: usize,
 }
@@ -29,16 +27,13 @@ impl<T, const N: usize> Buffer<T, N> {
         let inner: Box<[CacheLine<T, N>]> =
             (0..cache_lines).map(|_| CacheLine::default()).collect();
 
-        let write_counts: Box<[UnsafeCell<usize>]> =
-            (0..cache_lines).map(|_| UnsafeCell::new(0)).collect();
-
         let cache_line_mask = cache_lines - 1;
 
         let buffer = Arc::new(Self {
             head: CachePadded(AtomicUsize::new(0)),
             tail: CachePadded(AtomicUsize::new(cache_line_mask)),
             inner,
-            write_counts,
+            slot_tracker: SlotTracker::new(capacity, 0, 0),
             cl_mask: cache_line_mask,
             capacity,
         });
@@ -54,8 +49,28 @@ impl<T, const N: usize> Buffer<T, N> {
         unsafe { self.inner.get_unchecked(index) }
     }
 
-    // # Safety: the caller has to make sure that index is within bounds of the write counts
-    pub(crate) unsafe fn get_write_count(&self, index: usize) -> usize {
-        unsafe { self.write_counts.get_unchecked(index).get().read() }
+    #[inline]
+    pub fn mark_occupied(&self, cl_index: usize, cl_offset: usize) {
+        let lo_idx = cl_index * N;
+        let hi_idx = lo_idx + cl_offset;
+
+        self.slot_tracker.mark_occupied(lo_idx, hi_idx);
+    }
+
+    #[inline]
+    pub fn mark_free(&self, cl_index: usize, cl_offset: usize) {
+        let hi_idx = cl_index * N + cl_offset;
+
+        self.slot_tracker.mark_free(hi_idx);
+    }
+
+    #[inline]
+    pub fn occupied_slots(&self) -> usize {
+        self.slot_tracker.len()
+    }
+
+    #[inline]
+    pub fn free_slots(&self) -> usize {
+        self.capacity - N - self.slot_tracker.len()
     }
 }

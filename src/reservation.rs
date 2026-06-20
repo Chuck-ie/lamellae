@@ -68,7 +68,7 @@ impl<T, const N: usize> SendReservation<'_, T, N> {
         let mut i = self.start_cl_index;
 
         while i != next_cl_index {
-            unsafe { self.tx.buffer.write_counts.get_unchecked(i).get().write(N) }
+            self.tx.buffer.mark_occupied(i, N);
             i = (i + 1) & self.tx.buffer.cl_mask;
         }
 
@@ -185,7 +185,7 @@ impl<T: Copy, const N: usize> RecvReservation<'_, T, N> {
         let mut i = self.start_cl_index;
 
         while i != next_cl_index {
-            unsafe { self.rx.buffer.write_counts.get_unchecked(i).get().write(0) }
+            self.rx.buffer.mark_free(i, N);
             i = (i + 1) & self.rx.buffer.cl_mask;
         }
 

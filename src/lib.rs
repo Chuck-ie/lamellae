@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod consumer;
 pub mod producer;
 pub mod reservation;
+mod slot_tracker;
 mod spinlock;
 mod wrapper;
 
