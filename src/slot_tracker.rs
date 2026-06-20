@@ -57,6 +57,8 @@ impl<const N: usize> SlotTracker<N> {
 
         let next = unsafe { (*tail).next.load(Ordering::Acquire) };
 
+        println!("slot_tracker mark_free: {tail_hi}");
+
         // remove fully read spans if theres more than one present
         if hi == tail_hi && !next.is_null() {
             let _ = unsafe { Box::from_raw(tail) };
@@ -69,10 +71,11 @@ impl<const N: usize> SlotTracker<N> {
         let mut spans = 0;
 
         while !curr.is_null() {
+            spans += 1;
+
             // # Safety: this pointer is allowed to be null and will get checked in the next
             // iteration of the loop, which makes this safe
             curr = unsafe { curr.read().next.load(Ordering::Relaxed) };
-            spans += 1;
         }
 
         spans
@@ -95,51 +98,49 @@ impl<const N: usize> SlotTracker<N> {
 
     pub fn occupied_in_cl(&self, cl_index: usize) -> usize {
         let mut curr = self.tail.load(Ordering::Relaxed);
-        let mut count = 0;
-
-        let line_start = cl_index * N;
-        let line_end = line_start + N;
+        let lo = cl_index * N;
 
         while !curr.is_null() {
-            // # Safety: Pointer is checked for null in the loop condition.
-            let lo = unsafe { (*curr).lo.load(Ordering::Relaxed) };
-            let hi = unsafe { (*curr).hi.load(Ordering::Relaxed) };
+            let (curr_lo, curr_hi) = unsafe {
+                (
+                    (*curr).lo.load(Ordering::Relaxed),
+                    (*curr).hi.load(Ordering::Relaxed),
+                )
+            };
 
-            let overlap_start = lo.max(line_start);
-            let overlap_end = hi.min(line_end);
-
-            if overlap_start < overlap_end {
-                count += overlap_end - overlap_start;
-            }
-
-            curr = unsafe { (*curr).next.load(Ordering::Relaxed) };
-        }
-
-        count
-    }
-
-    // pub fn continuous_occupied_from(&self, idx: usize) -> usize {
-    pub fn continuous_occupied_from(&self, cl_index: usize, cl_offset: usize) -> usize {
-        let idx = cl_index * N + cl_offset;
-        let mut curr = self.tail.load(Ordering::Relaxed);
-        let mask = self.capacity - 1;
-
-        while !curr.is_null() {
-            // # Safety: pointer is checked for null in the loop condition
-            let lo = unsafe { (*curr).lo.load(Ordering::Relaxed) };
-            let hi = unsafe { (*curr).hi.load(Ordering::Relaxed) };
-
-            let span_len = hi.wrapping_sub(lo) & mask;
-            let offset = idx.wrapping_sub(lo) & mask;
-
-            if offset < span_len {
-                return span_len - offset;
+            if lo >= curr_lo && lo <= curr_hi {
+                return curr_hi.wrapping_sub(lo) & (self.capacity - 1);
             }
 
             curr = unsafe { (*curr).next.load(Ordering::Relaxed) };
         }
 
         0
+    }
+
+    pub fn continuous_occupied(&self, flat_idx: usize) -> usize {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let hi = unsafe { (*tail).hi.load(Ordering::Relaxed) };
+
+        if hi >= flat_idx {
+            hi.wrapping_sub(flat_idx)
+        } else {
+            0
+        }
+    }
+
+    pub fn continuous_free(&self, flat_idx: usize) -> usize {
+        let head = self.head.load(Ordering::Relaxed);
+        let hi = unsafe { (*head).hi.load(Ordering::Relaxed) };
+        let total_occupied = hi.saturating_sub(flat_idx);
+
+        println!("slot_tracker continuous_free: {flat_idx}, {hi}, {total_occupied}");
+
+        if self.capacity >= total_occupied {
+            self.capacity.wrapping_sub(total_occupied)
+        } else {
+            0
+        }
     }
 }
 

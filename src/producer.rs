@@ -85,7 +85,10 @@ impl<T, const N: usize> Producer<T, N> {
     {
         let max_batch_size = self.buffer.capacity - N;
         let batch_size = buf.len().min(max_batch_size);
-        let final_batch_size = batch_size.min(self.buffer.free_slots());
+        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
+
+        println!("continous_free: {continous_free}");
+        let final_batch_size = batch_size.min(continous_free);
 
         if final_batch_size == 0 {
             return Err(Error::QueueFull);
@@ -105,7 +108,9 @@ impl<T, const N: usize> Producer<T, N> {
             return Err(Error::BatchTooLarge);
         }
 
-        if batch_size > self.buffer.free_slots() {
+        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
+
+        if batch_size > continous_free {
             return Err(Error::QueueFull);
         }
 
@@ -167,7 +172,8 @@ impl<T, const N: usize> Producer<T, N> {
         T: Copy,
     {
         let max_batch_size = self.buffer.capacity - N;
-        let reservation_size = size.min(max_batch_size).min(self.buffer.free_slots());
+        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
+        let reservation_size = size.min(max_batch_size).min(continous_free);
 
         if reservation_size == 0 {
             return Err(Error::QueueFull);
@@ -186,7 +192,9 @@ impl<T, const N: usize> Producer<T, N> {
             return Err(Error::BatchTooLarge);
         }
 
-        if size > self.buffer.free_slots() {
+        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
+
+        if size > continous_free {
             return Err(Error::QueueFull);
         }
 
@@ -243,6 +251,7 @@ impl<T, const N: usize> Producer<T, N> {
         // case(curr_cl_head == 1): means 1 has not yet been written
         // case(curr_cl_head == N): means N has not yet been written
         // Safety: curr_head is exclusively owned by the writer and is within bounds
+
         self.buffer.mark_occupied(curr_cl_index, curr_cl_offset);
 
         self.cl_index = next_head;

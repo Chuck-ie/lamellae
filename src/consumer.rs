@@ -55,12 +55,13 @@ impl<T, const N: usize> Consumer<T, N> {
             }
 
             // Safety: curr_tail is verified against curr_head and is within bounds
+            println!("consumer mark_free: {curr_tail}, {N}");
             self.buffer.mark_free(curr_tail, N);
 
             // Safety: next_tail is verified against curr_head and is within bounds
             let next_cache_line = unsafe { self.buffer.get_cache_line(next_tail) };
             let value = unsafe { next_cache_line.read(0) };
-            let next_write_count = self.buffer.slot_tracker.occupied_in_cl(next_tail);
+            let next_write_count = self.buffer.occupied_in_cl(next_tail);
 
             self.cl_write_count = next_write_count;
             self.cl_index = next_tail;
@@ -89,8 +90,7 @@ impl<T, const N: usize> Consumer<T, N> {
         let batch_size = buf.len().min(max_batch_size);
         let continous_occupied = self
             .buffer
-            .slot_tracker
-            .continuous_occupied_from(self.cl_index, self.cl_offset);
+            .continuous_occupied(self.cl_index, self.cl_offset);
 
         let final_batch_size = batch_size.min(continous_occupied);
 
@@ -114,8 +114,7 @@ impl<T, const N: usize> Consumer<T, N> {
 
         let continous_occupied = self
             .buffer
-            .slot_tracker
-            .continuous_occupied_from(self.cl_index, self.cl_offset);
+            .continuous_occupied(self.cl_index, self.cl_offset);
 
         if batch_size > continous_occupied {
             return Err(Error::QueueEmpty);
@@ -181,8 +180,7 @@ impl<T, const N: usize> Consumer<T, N> {
         let max_batch_size = self.buffer.capacity - N;
         let continous_occupied = self
             .buffer
-            .slot_tracker
-            .continuous_occupied_from(self.cl_index, self.cl_offset);
+            .continuous_occupied(self.cl_index, self.cl_offset);
 
         let reservation_size = size.min(max_batch_size).min(continous_occupied);
 
@@ -205,8 +203,7 @@ impl<T, const N: usize> Consumer<T, N> {
 
         let continous_occupied = self
             .buffer
-            .slot_tracker
-            .continuous_occupied_from(self.cl_index, self.cl_offset);
+            .continuous_occupied(self.cl_index, self.cl_offset);
 
         if size > continous_occupied {
             return Err(Error::QueueEmpty);
