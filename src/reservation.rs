@@ -62,18 +62,13 @@ impl<T, const N: usize> SendReservation<'_, T, N> {
             next_cl_offset = N;
         }
 
+        let lo_cl_index = self.start_cl_index;
+        let hi_cl_index = next_cl_index;
+        let lo_ptr = SlotPtr::from((lo_cl_index, 0));
+        let hi_ptr = SlotPtr::from((hi_cl_index, 0));
+        self.tx.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
+
         self.tx.slot_ptr.set(next_cl_index, next_cl_offset);
-        let mut i = self.start_cl_index;
-
-        while i != next_cl_index {
-            let curr = i;
-            let next = (i + 1) & self.tx.buffer.cl_mask;
-            let lo_ptr = SlotPtr::from((curr, 0));
-            let hi_ptr = SlotPtr::from((next, 0));
-            self.tx.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
-            i = next;
-        }
-
         self.tx.buffer.head.store(next_cl_index, Ordering::Release);
     }
 
@@ -181,15 +176,10 @@ impl<T: Copy, const N: usize> RecvReservation<'_, T, N> {
             next_cl_offset = N;
         }
 
+        let hi_ptr = SlotPtr::from((next_cl_index, 0));
+        self.rx.buffer.slot_tracker.mark_free(hi_ptr);
+
         self.rx.slot_ptr.set(next_cl_index, next_cl_offset);
-        let mut i = self.start_cl_index;
-
-        while i != next_cl_index {
-            i = (i + 1) & self.rx.buffer.cl_mask;
-            let hi_ptr = SlotPtr::from((i, 0));
-            self.rx.buffer.slot_tracker.mark_free(hi_ptr);
-        }
-
         self.rx.buffer.tail.store(next_cl_index, Ordering::Release);
     }
 

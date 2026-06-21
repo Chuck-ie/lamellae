@@ -1,16 +1,21 @@
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
+};
 
 use crate::SlotPtr;
 
 pub struct SlotTracker<const N: usize> {
-    tail: AtomicPtr<Span>,
-    head: AtomicPtr<Span>,
+    // tail: AtomicPtr<Span>,
+    // head: AtomicPtr<Span>,
+    tail: UnsafeCell<*mut Span>,
+    head: UnsafeCell<*mut Span>,
     cl_mask: usize,
 }
 
 impl<const N: usize> Drop for SlotTracker<N> {
     fn drop(&mut self) {
-        let mut curr = self.tail.load(Ordering::Relaxed);
+        let mut curr = unsafe { self.tail.get().read() };
 
         while !curr.is_null() {
             // # Safety: this pointer is allowed to be null and will get checked in the next
@@ -46,8 +51,8 @@ impl<const N: usize> SlotTracker<N> {
         let initial = Span::new(tail_packed, head_packed);
 
         Self {
-            tail: AtomicPtr::new(initial),
-            head: AtomicPtr::new(initial),
+            tail: UnsafeCell::new(initial),
+            head: UnsafeCell::new(initial),
             cl_mask: capacity - 1,
         }
     }
@@ -56,8 +61,8 @@ impl<const N: usize> SlotTracker<N> {
         let lo = Self::pack(lo_ptr);
         let hi = Self::pack(hi_ptr);
 
-        let head = self.head.load(Ordering::Relaxed);
-        let head_hi = unsafe { (*head).hi.load(Ordering::Relaxed) };
+        let head = unsafe { self.head.get().read() };
+        let head_hi = unsafe { (*head).hi.load(Ordering::Acquire) };
 
         // extend head
         if lo == head_hi {
@@ -68,13 +73,13 @@ impl<const N: usize> SlotTracker<N> {
             std::hint::cold_path();
             let new_span = Span::new(lo, hi);
             unsafe { (*head).next.store(new_span, Ordering::Release) };
-            self.head.store(new_span, Ordering::Release);
+            unsafe { self.head.get().write(new_span) }
         }
     }
 
     pub fn mark_free(&self, hi_ptr: SlotPtr) {
         let hi = Self::pack(hi_ptr);
-        let tail = self.tail.load(Ordering::Relaxed);
+        let tail = unsafe { self.tail.get().read() };
         let tail_hi = unsafe { (*tail).hi.load(Ordering::Acquire) };
 
         unsafe { (*tail).lo.store(hi, Ordering::Release) };
@@ -83,12 +88,12 @@ impl<const N: usize> SlotTracker<N> {
         // remove fully read spans if theres more than one present
         if hi == tail_hi && !next.is_null() {
             let _ = unsafe { Box::from_raw(tail) };
-            self.tail.store(next, Ordering::Release);
+            unsafe { self.tail.get().write(next) }
         }
     }
 
     pub fn next_used(&self, r_ptr: SlotPtr) -> usize {
-        let tail = self.tail.load(Ordering::Relaxed);
+        let tail = unsafe { self.tail.get().read() };
         let tail_hi = unsafe { (*tail).hi.load(Ordering::Acquire) };
         let (r_cl_index, r_cl_offset) = r_ptr.into();
         let (w_cl_index, w_cl_offset) = Self::unpack(tail_hi);
@@ -110,7 +115,7 @@ impl<const N: usize> SlotTracker<N> {
     }
 
     pub fn next_free(&self, w_ptr: SlotPtr) -> usize {
-        let tail = self.tail.load(Ordering::Relaxed);
+        let tail = unsafe { self.tail.get().read() };
         let tail_lo = unsafe { (*tail).lo.load(Ordering::Acquire) };
         let (r_cl_index, r_cl_offset) = Self::unpack(tail_lo);
         let (w_cl_index, w_cl_offset) = w_ptr.into();
@@ -132,7 +137,7 @@ impl<const N: usize> SlotTracker<N> {
     }
 
     pub fn occupied_in_cl(&self, cl_index: usize) -> usize {
-        let mut curr = self.tail.load(Ordering::Relaxed);
+        let mut curr = unsafe { self.tail.get().read() };
         let cl_start = cl_index * N;
 
         while !curr.is_null() {
@@ -160,7 +165,7 @@ impl<const N: usize> SlotTracker<N> {
     }
 
     pub fn spans(&self) -> usize {
-        let mut curr = self.tail.load(Ordering::Relaxed);
+        let mut curr = unsafe { self.tail.get().read() };
         let mut spans = 0;
 
         while !curr.is_null() {
@@ -175,7 +180,7 @@ impl<const N: usize> SlotTracker<N> {
     }
 
     pub fn len(&self) -> usize {
-        let mut curr = self.tail.load(Ordering::Relaxed);
+        let mut curr = unsafe { self.tail.get().read() };
         let mut len = 0;
 
         while !curr.is_null() {

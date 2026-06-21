@@ -4,14 +4,14 @@ use std::time::{Duration, Instant};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use lamellae::channel;
 
-// const BATCH_COUNT: u64 = 40_000;
-// const BATCH_SIZE: usize = 128;
+const BATCH_COUNT: u64 = 40_000;
+const BATCH_SIZE: usize = 128;
 // const BATCH_COUNT: u64 = 20_000;
 // const BATCH_SIZE: usize = 256;
 // const BATCH_COUNT: u64 = 10_000;
 // const BATCH_SIZE: usize = 512;
-const BATCH_COUNT: u64 = 25_000_000;
-const BATCH_SIZE: usize = 128;
+// const BATCH_COUNT: u64 = 25_000_000;
+// const BATCH_SIZE: usize = 128;
 const CAPACITY: usize = 16384;
 // const CAPACITY: usize = 2048;
 
@@ -64,105 +64,6 @@ fn bench_rtrb_batch() -> Duration {
     let _sum = consumer_handle.join().unwrap();
     start.elapsed()
 }
-
-// fn bench_lamellae_reservation() -> Duration {
-//     let (mut tx, mut rx) = channel!(Message, 2048);
-//
-//     let consumer_handle = thread::spawn(move || {
-//         let mut sum = 0;
-//         let mut read_buf = [0u64; BATCH_SIZE];
-//
-//         for _ in 0..BATCH_COUNT {
-//             let mut reservation = loop {
-//                 if let Ok(res) = rx.try_reserve_exact(BATCH_SIZE) {
-//                     break res;
-//                 }
-//                 thread::yield_now();
-//             };
-//
-//             reservation.recv_slice(&mut read_buf);
-//
-//             for msg in &read_buf {
-//                 sum += msg;
-//             }
-//         }
-//         sum
-//     });
-//
-//     let start = Instant::now();
-//
-//     for batch in 0..BATCH_COUNT {
-//         let mut local_buf = [0u64; BATCH_SIZE];
-//
-//         for (j, val) in local_buf.iter_mut().enumerate() {
-//             *val = batch * BATCH_SIZE as u64 + j as u64;
-//         }
-//
-//         {
-//             let mut reservation = loop {
-//                 if let Ok(res) = tx.try_reserve_exact(BATCH_SIZE) {
-//                     break res;
-//                 }
-//                 thread::yield_now();
-//             };
-//
-//             reservation.send_slice(&local_buf);
-//         }
-//
-//         while tx.flush().is_err() {}
-//     }
-//
-//     let _sum = consumer_handle.join().unwrap();
-//     start.elapsed()
-// }
-
-// fn bench_lamellae_reservation() -> Duration {
-//     let (mut tx, mut rx) = channel!(Message, 2048);
-//
-//     let consumer_handle = thread::spawn(move || {
-//         let mut sum = 0;
-//
-//         for _ in 0..BATCH_COUNT {
-//             let mut reservation = loop {
-//                 if let Ok(res) = rx.try_reserve_exact(BATCH_SIZE) {
-//                     break res;
-//                 }
-//                 thread::yield_now();
-//             };
-//
-//             while let Some(msg) = reservation.recv() {
-//                 sum += msg;
-//             }
-//         }
-//         sum
-//     });
-//
-//     let start = Instant::now();
-//
-//     for batch in 0..BATCH_COUNT {
-//         let mut local_buf = [0u64; BATCH_SIZE];
-//
-//         for (j, val) in local_buf.iter_mut().enumerate() {
-//             *val = batch * BATCH_SIZE as u64 + j as u64;
-//         }
-//
-//         let mut reservation = loop {
-//             if let Ok(res) = tx.try_reserve_exact(BATCH_SIZE) {
-//                 break res;
-//             }
-//             thread::yield_now();
-//         };
-//
-//         for j in local_buf {
-//             reservation.send(j);
-//         }
-//     }
-//
-//     while tx.flush().is_err() {}
-//
-//     let _sum = consumer_handle.join().unwrap();
-//     start.elapsed()
-// }
 
 fn bench_lamellae_reservation() -> Duration {
     let (mut tx, mut rx) = channel!(Message, CAPACITY);
@@ -223,16 +124,6 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
     let total_bytes = BATCH_COUNT * BATCH_SIZE as u64 * std::mem::size_of::<Message>() as u64;
     group.throughput(Throughput::Bytes(total_bytes));
 
-    group.bench_function("Lamellae Zero-Copy Reservation", |b| {
-        b.iter_custom(|iters| {
-            let mut total_duration = Duration::ZERO;
-            for _ in 0..iters {
-                total_duration += bench_lamellae_reservation();
-            }
-            total_duration
-        });
-    });
-
     group.bench_function("rtrb Chunk Slices", |b| {
         b.iter_custom(|iters| {
             let mut total_duration = Duration::ZERO;
@@ -243,13 +134,23 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("Lamellae Zero-Copy Reservation", |b| {
+        b.iter_custom(|iters| {
+            let mut total_duration = Duration::ZERO;
+            for _ in 0..iters {
+                total_duration += bench_lamellae_reservation();
+            }
+            total_duration
+        });
+    });
+
     group.finish();
 }
 
-fn main() {
-    let elapsed = bench_lamellae_reservation();
-    println!("elapsed: {}", elapsed.as_millis());
-}
+// fn main() {
+//     let elapsed = bench_lamellae_reservation();
+//     println!("elapsed: {}", elapsed.as_millis());
+// }
 
-// criterion_group!(benches, criterion_batched_benchmarks);
-// criterion_main!(benches);
+criterion_group!(benches, criterion_batched_benchmarks);
+criterion_main!(benches);
