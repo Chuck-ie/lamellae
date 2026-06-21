@@ -4,14 +4,14 @@ use std::time::{Duration, Instant};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use lamellae::channel;
 
-const BATCH_COUNT: u64 = 40_000;
-const BATCH_SIZE: usize = 128;
+// const BATCH_COUNT: u64 = 40_000;
+// const BATCH_SIZE: usize = 128;
 // const BATCH_COUNT: u64 = 20_000;
 // const BATCH_SIZE: usize = 256;
 // const BATCH_COUNT: u64 = 10_000;
 // const BATCH_SIZE: usize = 512;
-// const BATCH_COUNT: u64 = 25_000_000;
-// const BATCH_SIZE: usize = 128;
+const BATCH_COUNT: u64 = 25_000_000;
+const BATCH_SIZE: usize = 128;
 const CAPACITY: usize = 16384;
 // const CAPACITY: usize = 2048;
 
@@ -147,10 +147,10 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-// fn main() {
-//     let elapsed = bench_lamellae_reservation();
-//     println!("elapsed: {}", elapsed.as_millis());
-// }
+fn main() {
+    let elapsed = bench_lamellae_reservation();
+    println!("elapsed: {}", elapsed.as_millis());
+}
 
-criterion_group!(benches, criterion_batched_benchmarks);
-criterion_main!(benches);
+// criterion_group!(benches, criterion_batched_benchmarks);
+// criterion_main!(benches);
