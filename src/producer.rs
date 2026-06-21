@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use crate::{buffer::Buffer, reservation::SendReservation, spinlock::Spinlock};
+use crate::{SlotPtr, buffer::Buffer, reservation::SendReservation, spinlock::Spinlock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -10,16 +10,14 @@ pub enum Error {
 
 pub struct Producer<T, const N: usize> {
     pub(crate) buffer: Arc<Buffer<T, N>>,
-    pub(crate) cl_index: usize,
-    pub(crate) cl_offset: usize,
+    pub(crate) slot_ptr: SlotPtr,
 }
 
 impl<T, const N: usize> Producer<T, N> {
     pub(crate) fn new(buffer: &Arc<Buffer<T, N>>) -> Self {
         Self {
-            cl_index: 0,
-            cl_offset: 0,
             buffer: buffer.clone(),
+            slot_ptr: SlotPtr::from((0, 0)),
         }
     }
 
@@ -38,8 +36,7 @@ impl<T, const N: usize> Producer<T, N> {
     }
 
     pub fn try_send(&mut self, value: T) -> Result<(), (T, Error)> {
-        let curr_head = self.cl_index;
-        let curr_cl_head = self.cl_offset;
+        let (curr_head, curr_cl_head) = self.slot_ptr.into();
 
         // slow path when trying to wrap around at a cache line border
         // if we finished writing to a cache line in the previous send
@@ -55,14 +52,15 @@ impl<T, const N: usize> Producer<T, N> {
                 return Err((value, Error::QueueFull));
             }
 
-            self.buffer.mark_occupied(curr_head, N);
+            let lo_ptr = SlotPtr::from((curr_head, 0));
+            let hi_ptr = SlotPtr::from((next_head, 0));
+            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
 
             // Safety: next_head is verified to not overlap with curr_tail and is within bounds
             let next_cache_line = unsafe { self.buffer.get_cache_line(next_head) };
             unsafe { next_cache_line.write(0, value) };
 
-            self.cl_index = next_head;
-            self.cl_offset = 1;
+            self.slot_ptr.set(next_head, 1);
 
             // Sync the advancement with the read thread
             self.buffer.head.store(next_head, Ordering::Release);
@@ -73,7 +71,7 @@ impl<T, const N: usize> Producer<T, N> {
             let cache_line = unsafe { self.buffer.get_cache_line(curr_head) };
             unsafe { cache_line.write(curr_cl_head, value) };
 
-            self.cl_offset = curr_cl_head + 1;
+            self.slot_ptr.cl_offset = curr_cl_head + 1;
         }
 
         Ok(())
@@ -85,10 +83,8 @@ impl<T, const N: usize> Producer<T, N> {
     {
         let max_batch_size = self.buffer.capacity - N;
         let batch_size = buf.len().min(max_batch_size);
-        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
-
-        println!("continous_free: {continous_free}");
-        let final_batch_size = batch_size.min(continous_free);
+        let continuous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
+        let final_batch_size = batch_size.min(continuous_free);
 
         if final_batch_size == 0 {
             return Err(Error::QueueFull);
@@ -108,9 +104,9 @@ impl<T, const N: usize> Producer<T, N> {
             return Err(Error::BatchTooLarge);
         }
 
-        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
+        let continuous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
 
-        if batch_size > continous_free {
+        if batch_size > continuous_free {
             return Err(Error::QueueFull);
         }
 
@@ -123,9 +119,8 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
+        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
         let batch_size = buf.len();
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
         let last_abs_index = self.buffer.capacity;
         let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
         let to_abs_index = from_abs_index + batch_size;
@@ -152,14 +147,16 @@ impl<T, const N: usize> Producer<T, N> {
             next_cl_offset = N;
         }
 
-        self.cl_index = next_cl_index;
-        self.cl_offset = next_cl_offset;
-
+        self.slot_ptr.set(next_cl_index, next_cl_offset);
         let mut i = curr_cl_index;
 
         while i != next_cl_index {
-            self.buffer.mark_occupied(i, N);
-            i = (i + 1) & self.buffer.cl_mask;
+            let curr = i;
+            let next = (i + 1) & self.buffer.cl_mask;
+            let lo_ptr = SlotPtr::from((curr, 0));
+            let hi_ptr = SlotPtr::from((next, 0));
+            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
+            i = next;
         }
 
         self.buffer.head.store(next_cl_index, Ordering::Release);
@@ -172,8 +169,8 @@ impl<T, const N: usize> Producer<T, N> {
         T: Copy,
     {
         let max_batch_size = self.buffer.capacity - N;
-        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
-        let reservation_size = size.min(max_batch_size).min(continous_free);
+        let continuous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
+        let reservation_size = size.min(max_batch_size).min(continuous_free);
 
         if reservation_size == 0 {
             return Err(Error::QueueFull);
@@ -192,7 +189,7 @@ impl<T, const N: usize> Producer<T, N> {
             return Err(Error::BatchTooLarge);
         }
 
-        let continous_free = self.buffer.continuous_free(self.cl_index, self.cl_offset);
+        let continous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
 
         if size > continous_free {
             return Err(Error::QueueFull);
@@ -205,8 +202,7 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
+        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
         let last_abs_index = self.buffer.capacity;
         let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
         let to_abs_index = from_abs_index + size;
@@ -236,8 +232,7 @@ impl<T, const N: usize> Producer<T, N> {
     }
 
     pub fn flush(&mut self) -> Result<(), Error> {
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
+        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
         let next_head = (curr_cl_index + 1) & self.buffer.cl_mask;
 
         // Sync with the reader's release when advancing its tail
@@ -247,15 +242,17 @@ impl<T, const N: usize> Producer<T, N> {
             return Err(Error::QueueFull);
         }
 
-        // case(curr_cl_head == 0): means 0 has not yet been written
-        // case(curr_cl_head == 1): means 1 has not yet been written
-        // case(curr_cl_head == N): means N has not yet been written
-        // Safety: curr_head is exclusively owned by the writer and is within bounds
+        if curr_cl_offset == N {
+            let lo_ptr = SlotPtr::from((curr_cl_index, 0));
+            let hi_ptr = SlotPtr::from((next_head, 0));
+            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
+        } else {
+            let lo_ptr = SlotPtr::from((curr_cl_index, 0));
+            let hi_ptr = SlotPtr::from((curr_cl_index, curr_cl_offset));
+            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
+        }
 
-        self.buffer.mark_occupied(curr_cl_index, curr_cl_offset);
-
-        self.cl_index = next_head;
-        self.cl_offset = 0;
+        self.slot_ptr.set(next_head, 0);
         self.buffer.head.store(next_head, Ordering::Release);
 
         Ok(())

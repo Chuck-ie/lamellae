@@ -1,6 +1,6 @@
 use std::{mem::MaybeUninit, sync::atomic::Ordering};
 
-use crate::{consumer::Consumer, producer::Producer};
+use crate::{SlotPtr, consumer::Consumer, producer::Producer};
 
 pub struct SendReservation<'a, T, const N: usize> {
     pub(crate) tx: &'a mut Producer<T, N>,
@@ -62,14 +62,16 @@ impl<T, const N: usize> SendReservation<'_, T, N> {
             next_cl_offset = N;
         }
 
-        self.tx.cl_index = next_cl_index;
-        self.tx.cl_offset = next_cl_offset;
-
+        self.tx.slot_ptr.set(next_cl_index, next_cl_offset);
         let mut i = self.start_cl_index;
 
         while i != next_cl_index {
-            self.tx.buffer.mark_occupied(i, N);
-            i = (i + 1) & self.tx.buffer.cl_mask;
+            let curr = i;
+            let next = (i + 1) & self.tx.buffer.cl_mask;
+            let lo_ptr = SlotPtr::from((curr, 0));
+            let hi_ptr = SlotPtr::from((next, 0));
+            self.tx.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
+            i = next;
         }
 
         self.tx.buffer.head.store(next_cl_index, Ordering::Release);
@@ -179,14 +181,13 @@ impl<T: Copy, const N: usize> RecvReservation<'_, T, N> {
             next_cl_offset = N;
         }
 
-        self.rx.cl_index = next_cl_index;
-        self.rx.cl_offset = next_cl_offset;
-
+        self.rx.slot_ptr.set(next_cl_index, next_cl_offset);
         let mut i = self.start_cl_index;
 
         while i != next_cl_index {
-            self.rx.buffer.mark_free(i, N);
             i = (i + 1) & self.rx.buffer.cl_mask;
+            let hi_ptr = SlotPtr::from((i, 0));
+            self.rx.buffer.slot_tracker.mark_free(hi_ptr);
         }
 
         self.rx.buffer.tail.store(next_cl_index, Ordering::Release);

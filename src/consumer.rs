@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use crate::{buffer::Buffer, reservation::RecvReservation, spinlock::Spinlock};
+use crate::{SlotPtr, buffer::Buffer, reservation::RecvReservation, spinlock::Spinlock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -10,17 +10,15 @@ pub enum Error {
 
 pub struct Consumer<T, const N: usize, const CLS: usize = 0> {
     pub(crate) buffer: Arc<Buffer<T, N>>,
-    pub(crate) cl_index: usize,
-    pub(crate) cl_offset: usize,
+    pub(crate) slot_ptr: SlotPtr,
     cl_write_count: usize,
 }
 
 impl<T, const N: usize> Consumer<T, N> {
     pub(crate) fn new(buffer: &Arc<Buffer<T, N>>) -> Self {
         Self {
-            cl_index: buffer.cl_mask,
-            cl_offset: N,
             buffer: buffer.clone(),
+            slot_ptr: SlotPtr::from((buffer.cl_mask, N)),
             cl_write_count: N,
         }
     }
@@ -37,46 +35,45 @@ impl<T, const N: usize> Consumer<T, N> {
     }
 
     pub fn try_recv(&mut self) -> Result<T, Error> {
-        let curr_tail = self.cl_index;
-        let curr_cl_tail = self.cl_offset;
+        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
         let curr_cl_write_count = self.cl_write_count;
 
         // If we finished reading from a cache line in the previous recv
-        if curr_cl_tail == curr_cl_write_count {
+        if curr_cl_offset == curr_cl_write_count {
             // Calculate the index of the next cache line by wrapping around buffer bounds using
             // fast modulo since cache_lines is always a power of 2
-            let next_tail = (curr_tail + 1) & self.buffer.cl_mask;
+            let next_cl_index = (curr_cl_index + 1) & self.buffer.cl_mask;
 
             // Sync with the writer's release when advancing its head
             let curr_head = self.buffer.head.load(Ordering::Acquire);
 
-            if next_tail == curr_head {
+            if next_cl_index == curr_head {
                 return Err(Error::QueueEmpty);
             }
 
             // Safety: curr_tail is verified against curr_head and is within bounds
-            println!("consumer mark_free: {curr_tail}, {N}");
-            self.buffer.mark_free(curr_tail, N);
+            println!("consumer mark_free: {curr_cl_index}, {N}");
+            let hi_ptr = SlotPtr::from((next_cl_index, 0));
+            self.buffer.slot_tracker.mark_free(hi_ptr);
 
             // Safety: next_tail is verified against curr_head and is within bounds
-            let next_cache_line = unsafe { self.buffer.get_cache_line(next_tail) };
+            let next_cache_line = unsafe { self.buffer.get_cache_line(next_cl_index) };
             let value = unsafe { next_cache_line.read(0) };
-            let next_write_count = self.buffer.occupied_in_cl(next_tail);
+            let next_write_count = self.buffer.slot_tracker.occupied_in_cl(next_cl_index);
 
             self.cl_write_count = next_write_count;
-            self.cl_index = next_tail;
-            self.cl_offset = 1;
+            self.slot_ptr.set(next_cl_index, 1);
 
             // Sync the advancement with the write thread
-            self.buffer.tail.store(next_tail, Ordering::Release);
+            self.buffer.tail.store(next_cl_index, Ordering::Release);
 
             Ok(value)
         } else {
             // Safety: curr_tail is always within bounds and guaranteed not to
             // reach the write head because we checked for empty state previously.
-            let cache_line = unsafe { self.buffer.get_cache_line(curr_tail) };
-            let value = unsafe { cache_line.read(curr_cl_tail) };
-            self.cl_offset = curr_cl_tail + 1;
+            let cache_line = unsafe { self.buffer.get_cache_line(curr_cl_index) };
+            let value = unsafe { cache_line.read(curr_cl_offset) };
+            self.slot_ptr.cl_offset = curr_cl_offset + 1;
 
             Ok(value)
         }
@@ -88,11 +85,9 @@ impl<T, const N: usize> Consumer<T, N> {
     {
         let max_batch_size = self.buffer.capacity - N;
         let batch_size = buf.len().min(max_batch_size);
-        let continous_occupied = self
-            .buffer
-            .continuous_occupied(self.cl_index, self.cl_offset);
 
-        let final_batch_size = batch_size.min(continous_occupied);
+        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
+        let final_batch_size = batch_size.min(continuous_used);
 
         if final_batch_size == 0 {
             return Err(Error::QueueEmpty);
@@ -112,11 +107,9 @@ impl<T, const N: usize> Consumer<T, N> {
             return Err(Error::BatchTooLarge);
         }
 
-        let continous_occupied = self
-            .buffer
-            .continuous_occupied(self.cl_index, self.cl_offset);
+        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
 
-        if batch_size > continous_occupied {
+        if batch_size > continuous_used {
             return Err(Error::QueueEmpty);
         }
 
@@ -129,9 +122,8 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         T: Copy,
     {
+        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
         let batch_size = buf.len();
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
         let last_abs_index = self.buffer.capacity;
         let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
         let to_abs_index = from_abs_index + batch_size;
@@ -158,14 +150,13 @@ impl<T, const N: usize> Consumer<T, N> {
             next_cl_offset = N;
         }
 
-        self.cl_index = next_cl_index;
-        self.cl_offset = next_cl_offset;
-
+        self.slot_ptr.set(next_cl_index, next_cl_offset);
         let mut i = curr_cl_index;
 
         while i != next_cl_index {
-            self.buffer.mark_free(i, N);
             i = (i + 1) & self.buffer.cl_mask;
+            let hi_ptr = SlotPtr::from((i, 0));
+            self.buffer.slot_tracker.mark_free(hi_ptr);
         }
 
         self.buffer.tail.store(next_cl_index, Ordering::Release);
@@ -178,11 +169,8 @@ impl<T, const N: usize> Consumer<T, N> {
         T: Copy,
     {
         let max_batch_size = self.buffer.capacity - N;
-        let continous_occupied = self
-            .buffer
-            .continuous_occupied(self.cl_index, self.cl_offset);
-
-        let reservation_size = size.min(max_batch_size).min(continous_occupied);
+        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
+        let reservation_size = size.min(max_batch_size).min(continuous_used);
 
         if reservation_size == 0 {
             return Err(Error::QueueEmpty);
@@ -201,11 +189,9 @@ impl<T, const N: usize> Consumer<T, N> {
             return Err(Error::BatchTooLarge);
         }
 
-        let continous_occupied = self
-            .buffer
-            .continuous_occupied(self.cl_index, self.cl_offset);
+        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
 
-        if size > continous_occupied {
+        if size > continuous_used {
             return Err(Error::QueueEmpty);
         }
 
@@ -216,8 +202,7 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         T: Copy,
     {
-        let curr_cl_index = self.cl_index;
-        let curr_cl_offset = self.cl_offset;
+        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
         let last_abs_index = self.buffer.capacity;
         let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
         let to_abs_index = from_abs_index + size;

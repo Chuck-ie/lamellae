@@ -46,6 +46,37 @@ macro_rules! channel {
     }};
 }
 
+#[derive(Clone, Copy)]
+struct SlotPtr {
+    cl_index: usize,
+    cl_offset: usize,
+}
+
+impl From<(usize, usize)> for SlotPtr {
+    #[inline]
+    fn from(tuple: (usize, usize)) -> Self {
+        Self {
+            cl_index: tuple.0,
+            cl_offset: tuple.1,
+        }
+    }
+}
+
+impl From<SlotPtr> for (usize, usize) {
+    #[inline]
+    fn from(slot: SlotPtr) -> Self {
+        (slot.cl_index, slot.cl_offset)
+    }
+}
+
+impl SlotPtr {
+    #[inline]
+    pub const fn set(&mut self, new_cl_index: usize, new_cl_offset: usize) {
+        self.cl_index = new_cl_index;
+        self.cl_offset = new_cl_offset;
+    }
+}
+
 // #[cfg(test)]
 // mod unit_tests {
 //     #[test]
