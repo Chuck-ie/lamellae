@@ -8,13 +8,17 @@ use lamellae::channel;
 // const BATCH_SIZE: usize = 128;
 // const BATCH_COUNT: u64 = 20_000;
 // const BATCH_SIZE: usize = 256;
+// const BATCH_COUNT: u64 = 10_000;
+// const BATCH_SIZE: usize = 512;
 const BATCH_COUNT: u64 = 25_000_000;
-const BATCH_SIZE: usize = 256;
+const BATCH_SIZE: usize = 128;
+const CAPACITY: usize = 16384;
+// const CAPACITY: usize = 2048;
 
 type Message = u64;
 
 fn bench_rtrb_batch() -> Duration {
-    let (mut tx, mut rx) = rtrb::RingBuffer::<Message>::new(2048);
+    let (mut tx, mut rx) = rtrb::RingBuffer::<Message>::new(CAPACITY);
     let start = Instant::now();
 
     let consumer_handle = thread::spawn(move || {
@@ -161,7 +165,7 @@ fn bench_rtrb_batch() -> Duration {
 // }
 
 fn bench_lamellae_reservation() -> Duration {
-    let (mut tx, mut rx) = channel!(Message, 2048);
+    let (mut tx, mut rx) = channel!(Message, CAPACITY);
 
     let consumer_handle = thread::spawn(move || {
         let mut sum = 0;

@@ -65,6 +65,7 @@ impl<const N: usize> SlotTracker<N> {
         }
         // add new span
         else {
+            std::hint::cold_path();
             let new_span = Span::new(lo, hi);
             unsafe { (*head).next.store(new_span, Ordering::Release) };
             self.head.store(new_span, Ordering::Release);
@@ -178,14 +179,14 @@ impl<const N: usize> SlotTracker<N> {
         let mut len = 0;
 
         while !curr.is_null() {
-            len += unsafe { (*curr).len(self.cl_mask) };
+            len += unsafe { (*curr).len::<N>(self.cl_mask) };
 
             // # Safety: this pointer is allowed to be null and will get checked in the next
             // iteration of the loop, which makes this safe
             curr = unsafe { curr.read().next.load(Ordering::Relaxed) };
         }
 
-        len
+        len.saturating_sub(N)
     }
 }
 
@@ -204,16 +205,20 @@ impl Span {
         }))
     }
 
-    pub fn len(&self, cl_mask: usize) -> usize {
+    pub fn len<const N: usize>(&self, slot_mask: usize) -> usize {
         debug_assert!(
-            (cl_mask + 1).is_power_of_two(),
+            (slot_mask + 1).is_power_of_two(),
             "capacity isnt a power of 2"
         );
 
         let lo = self.lo.load(Ordering::Relaxed);
         let hi = self.hi.load(Ordering::Relaxed);
+        let (lo_cl_index, lo_cl_offset) = SlotTracker::<N>::unpack(lo);
+        let (hi_cl_index, hi_cl_offset) = SlotTracker::<N>::unpack(hi);
+        let flat_lo = (lo_cl_index * N + lo_cl_offset) & slot_mask;
+        let flat_hi = (hi_cl_index * N + hi_cl_offset) & slot_mask;
 
-        hi.wrapping_sub(lo) & cl_mask
+        flat_hi.wrapping_sub(flat_lo) & slot_mask
     }
 }
 

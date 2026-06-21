@@ -272,143 +272,159 @@ impl<T, const N: usize> Producer<T, N> {
     }
 }
 
-// #[cfg(test)]
-// mod producer_tests {
-//     use crate::channel;
-//     use std::sync::atomic::Ordering;
-//
-//     const CL_CAPACITY: usize = 8;
-//     const TOTAL_CAPACITY: usize = 4 * CL_CAPACITY;
-//
-//     type TestMessage = usize;
-//
-//     #[test]
-//     fn test_free_slots_one_cl() {
-//         let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
-//
-//         assert_eq!(tx.free_slots(), TOTAL_CAPACITY - CL_CAPACITY);
-//
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
-//         assert!(tx.flush().is_ok());
-//         assert_eq!(tx.free_slots(), TOTAL_CAPACITY - 2 * CL_CAPACITY);
-//
-//         assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
-//         assert_eq!(tx.free_slots(), TOTAL_CAPACITY - CL_CAPACITY);
-//     }
-//
-//     #[test]
-//     fn test_free_slots_mul_cl() {
-//         let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
-//
-//         assert_eq!(tx.free_slots(), TOTAL_CAPACITY - CL_CAPACITY);
-//
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
-//         assert!(tx.flush().is_ok());
-//         assert_eq!(tx.free_slots(), TOTAL_CAPACITY - 2 * CL_CAPACITY);
-//
-//         assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
-//         assert_eq!(tx.free_slots(), TOTAL_CAPACITY - CL_CAPACITY);
-//     }
-//
-//     #[test]
-//     fn test_flush_cl_full() {
-//         let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let cl_index = tx.cl_index;
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
-//
-//         let before_flush = unsafe { tx.buffer.write_counts.get_unchecked(cl_index).get().read() };
-//         assert_eq!(before_flush, 0);
-//
-//         assert!(tx.flush().is_ok());
-//
-//         let after_flush = unsafe { tx.buffer.write_counts.get_unchecked(cl_index).get().read() };
-//         assert_eq!(after_flush, CL_CAPACITY);
-//     }
-//
-//     #[test]
-//     fn test_flush_cl_partial() {
-//         let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let cl_index = tx.cl_index;
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
-//
-//         let before_flush = unsafe { tx.buffer.write_counts.get_unchecked(cl_index).get().read() };
-//         assert_eq!(before_flush, 0);
-//
-//         assert!(tx.flush().is_ok());
-//
-//         let after_flush = unsafe { tx.buffer.write_counts.get_unchecked(cl_index).get().read() };
-//         assert_eq!(after_flush, CL_CAPACITY / 2);
-//     }
-//
-//     #[test]
-//     fn test_wrapping_is_lazy() {
-//         let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let cl_index = tx.cl_index;
-//
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
-//         assert_eq!(tx.cl_index, cl_index);
-//         assert_eq!(tx.cl_index, tx.buffer.head.load(Ordering::Acquire));
-//         assert_eq!(tx.cl_offset, CL_CAPACITY);
-//
-//         assert!(tx.try_send(7).is_ok());
-//         assert_eq!(tx.cl_index, cl_index + 1);
-//         assert_eq!(tx.cl_index, tx.buffer.head.load(Ordering::Acquire));
-//         assert_eq!(tx.cl_offset, 1);
-//     }
-//
-//     #[test]
-//     fn test_advance_cl_index_forward() {
-//         let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let cl_index = tx.cl_index;
-//
-//         assert_eq!(tx.cl_index, tx.buffer.head.load(Ordering::Acquire));
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY + 1]).is_ok());
-//         assert_eq!(tx.cl_index, cl_index + 1);
-//         assert_eq!(tx.cl_index, tx.buffer.head.load(Ordering::Acquire));
-//     }
-//
-//     #[test]
-//     fn test_advance_cl_index_wrapping() {
-//         let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let last_cl_index = 3;
-//
-//         tx.cl_index = last_cl_index;
-//         tx.cl_offset = CL_CAPACITY;
-//         tx.buffer.head.store(last_cl_index, Ordering::Release);
-//
-//         rx.cl_index = last_cl_index - 1;
-//         rx.cl_offset = CL_CAPACITY;
-//         rx.buffer.tail.store(last_cl_index - 1, Ordering::Release);
-//
-//         assert_eq!(tx.cl_index, tx.buffer.head.load(Ordering::Acquire));
-//         assert_eq!(tx.cl_index, last_cl_index);
-//         assert!(tx.try_send(7).is_ok());
-//         assert_eq!(tx.cl_index, tx.buffer.head.load(Ordering::Acquire));
-//         assert_eq!(tx.cl_index, 0);
-//     }
-//
-//     #[test]
-//     fn test_advance_cl_offset_forward() {
-//         let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let cl_index = tx.cl_index;
-//         let cl_offset = tx.cl_offset;
-//
-//         assert!(tx.try_send(7).is_ok());
-//         assert_eq!(tx.cl_index, cl_index);
-//         assert_eq!(tx.cl_offset, cl_offset + 1);
-//     }
-//
-//     #[test]
-//     fn test_advance_cl_offset_wrapping() {
-//         let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-//         let cl_index = tx.cl_index;
-//
-//         assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
-//         assert_eq!(tx.cl_index, cl_index);
-//         assert_eq!(tx.cl_offset, CL_CAPACITY);
-//
-//         assert!(tx.try_send(7).is_ok());
-//         assert_eq!(tx.cl_index, cl_index + 1);
-//         assert_eq!(tx.cl_offset, 1);
-//     }
-// }
+#[cfg(test)]
+mod producer_tests {
+    use crate::channel;
+    use std::sync::atomic::Ordering;
+
+    const CL_CAPACITY: usize = 8;
+    const TOTAL_CAPACITY: usize = 4 * CL_CAPACITY;
+
+    type TestMessage = usize;
+
+    #[test]
+    fn test_free_slots_one_cl() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert_eq!(
+            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
+            TOTAL_CAPACITY - CL_CAPACITY
+        );
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+        assert_eq!(
+            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
+            TOTAL_CAPACITY - 2 * CL_CAPACITY
+        );
+
+        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
+        assert_eq!(
+            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
+            TOTAL_CAPACITY - CL_CAPACITY
+        );
+    }
+
+    #[test]
+    fn test_free_slots_mul_cl() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert_eq!(
+            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
+            TOTAL_CAPACITY - CL_CAPACITY
+        );
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
+        assert!(tx.flush().is_ok());
+        assert_eq!(
+            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
+            TOTAL_CAPACITY - 2 * CL_CAPACITY
+        );
+
+        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
+        assert_eq!(
+            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
+            TOTAL_CAPACITY - CL_CAPACITY
+        );
+    }
+
+    #[test]
+    fn test_flush_cl_full() {
+        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
+        let cl_index = tx.slot_ptr.cl_index;
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+
+        let before_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
+        assert_eq!(before_flush, 0);
+
+        assert!(tx.flush().is_ok());
+
+        let after_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
+        assert_eq!(after_flush, CL_CAPACITY);
+    }
+
+    #[test]
+    fn test_flush_cl_partial() {
+        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
+        let cl_index = tx.slot_ptr.cl_index;
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
+
+        let before_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
+        assert_eq!(before_flush, 0);
+
+        assert!(tx.flush().is_ok());
+
+        let after_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
+        assert_eq!(after_flush, CL_CAPACITY / 2);
+    }
+
+    #[test]
+    fn test_wrapping_is_lazy() {
+        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
+        let cl_index = tx.slot_ptr.cl_index;
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, cl_index);
+        assert_eq!(tx.slot_ptr.cl_index, tx.buffer.head.load(Ordering::Acquire));
+        assert_eq!(tx.slot_ptr.cl_offset, CL_CAPACITY);
+
+        assert!(tx.try_send(7).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, cl_index + 1);
+        assert_eq!(tx.slot_ptr.cl_index, tx.buffer.head.load(Ordering::Acquire));
+        assert_eq!(tx.slot_ptr.cl_offset, 1);
+    }
+
+    #[test]
+    fn test_advance_cl_index_forward() {
+        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
+        let cl_index = tx.slot_ptr.cl_index;
+
+        assert_eq!(tx.slot_ptr.cl_index, tx.buffer.head.load(Ordering::Acquire));
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY + 1]).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, cl_index + 1);
+        assert_eq!(tx.slot_ptr.cl_index, tx.buffer.head.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_advance_cl_index_wrapping() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+        let last_cl_index = 3;
+
+        tx.slot_ptr.set(last_cl_index, CL_CAPACITY);
+        tx.buffer.head.store(last_cl_index, Ordering::Release);
+
+        rx.slot_ptr.set(last_cl_index - 1, CL_CAPACITY);
+        rx.buffer.tail.store(last_cl_index - 1, Ordering::Release);
+
+        assert_eq!(tx.slot_ptr.cl_index, tx.buffer.head.load(Ordering::Acquire));
+        assert_eq!(tx.slot_ptr.cl_index, last_cl_index);
+        assert!(tx.try_send(7).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, tx.buffer.head.load(Ordering::Acquire));
+        assert_eq!(tx.slot_ptr.cl_index, 0);
+    }
+
+    #[test]
+    fn test_advance_cl_offset_forward() {
+        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
+        let cl_index = tx.slot_ptr.cl_index;
+        let cl_offset = tx.slot_ptr.cl_offset;
+
+        assert!(tx.try_send(7).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, cl_index);
+        assert_eq!(tx.slot_ptr.cl_offset, cl_offset + 1);
+    }
+
+    #[test]
+    fn test_advance_cl_offset_wrapping() {
+        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
+        let cl_index = tx.slot_ptr.cl_index;
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, cl_index);
+        assert_eq!(tx.slot_ptr.cl_offset, CL_CAPACITY);
+
+        assert!(tx.try_send(7).is_ok());
+        assert_eq!(tx.slot_ptr.cl_index, cl_index + 1);
+        assert_eq!(tx.slot_ptr.cl_offset, 1);
+    }
+}
