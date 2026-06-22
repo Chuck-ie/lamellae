@@ -2,7 +2,6 @@ pub mod buffer;
 pub mod consumer;
 mod interruption_tracker;
 pub mod producer;
-pub mod reservation;
 mod spinlock;
 mod wrapper;
 

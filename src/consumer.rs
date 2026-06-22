@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use crate::{SlotPtr, buffer::Buffer, reservation::RecvReservation, spinlock::Spinlock};
+use crate::{SlotPtr, buffer::Buffer, spinlock::Spinlock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -158,71 +158,6 @@ impl<T, const N: usize> Consumer<T, N> {
         self.buffer.tail.store(next_cl_index, Ordering::Release);
 
         batch_size
-    }
-
-    pub fn try_reserve(&mut self, size: usize) -> Result<RecvReservation<'_, T, N>, Error>
-    where
-        T: Copy,
-    {
-        let max_batch_size = self.buffer.max_size();
-        let continuous = self.continuous_used();
-        let reservation_size = size.min(max_batch_size).min(continuous);
-
-        if reservation_size == 0 {
-            return Err(Error::QueueEmpty);
-        }
-
-        // Safety: reservation_size <= continuous which was verified readable above
-        Ok(unsafe { self.reserve_exact_unchecked(reservation_size) })
-    }
-
-    pub fn try_reserve_exact(&mut self, size: usize) -> Result<RecvReservation<'_, T, N>, Error>
-    where
-        T: Copy,
-    {
-        if size > self.buffer.max_size() {
-            return Err(Error::BatchTooLarge);
-        }
-
-        if size > self.continuous_used() {
-            return Err(Error::QueueEmpty);
-        }
-
-        // Safety: size <= continuous which was verified readable above
-        Ok(unsafe { self.reserve_exact_unchecked(size) })
-    }
-
-    unsafe fn reserve_exact_unchecked(&mut self, size: usize) -> RecvReservation<'_, T, N>
-    where
-        T: Copy,
-    {
-        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
-        let last_abs_index = self.buffer.capacity;
-        let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
-        let to_abs_index = from_abs_index + size;
-
-        let (s1, s1_remaining, s2, s2_remaining) = if to_abs_index < last_abs_index {
-            let s_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            (s_ptr.cast::<T>(), size, std::ptr::null(), 0)
-        } else {
-            let s1_len = last_abs_index - from_abs_index;
-            let s1_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            let s2_len = size - s1_len;
-            let s2_ptr = unsafe { self.get_slice_ptr(0, 0) };
-
-            (s1_ptr.cast::<T>(), s1_len, s2_ptr.cast::<T>(), s2_len)
-        };
-
-        RecvReservation {
-            rx: self,
-            s1,
-            s1_remaining,
-            s2,
-            s2_remaining,
-            total_reserved: size,
-            start_cl_index: curr_cl_index,
-            start_cl_offset: curr_cl_offset,
-        }
     }
 
     fn continuous_used(&mut self) -> usize {

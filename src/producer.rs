@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use crate::{SlotPtr, buffer::Buffer, reservation::SendReservation, spinlock::Spinlock};
+use crate::{SlotPtr, buffer::Buffer, spinlock::Spinlock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -153,79 +153,6 @@ impl<T, const N: usize> Producer<T, N> {
         self.buffer.head.store(next_cl_index, Ordering::Release);
 
         batch_size
-    }
-
-    pub fn try_reserve(&mut self, size: usize) -> Result<SendReservation<'_, T, N>, Error>
-    where
-        T: Copy,
-    {
-        let max_batch_size = self.buffer.max_size();
-        let reservation_size = size.min(max_batch_size).min(self.continuous_free());
-
-        if reservation_size == 0 {
-            self.refresh_cached_cl_read();
-            let reservation_size = size.min(max_batch_size).min(self.continuous_free());
-
-            if reservation_size == 0 {
-                return Err(Error::QueueFull);
-            }
-        }
-
-        Ok(unsafe { self.reserve_exact_unchecked(reservation_size) })
-    }
-
-    pub fn try_reserve_exact(&mut self, size: usize) -> Result<SendReservation<'_, T, N>, Error>
-    where
-        T: Copy,
-    {
-        let max_batch_size = self.buffer.max_size();
-
-        if size > max_batch_size {
-            return Err(Error::BatchTooLarge);
-        }
-
-        if size > self.continuous_free() {
-            self.refresh_cached_cl_read();
-
-            if size > self.continuous_free() {
-                return Err(Error::QueueFull);
-            }
-        }
-
-        Ok(unsafe { self.reserve_exact_unchecked(size) })
-    }
-
-    unsafe fn reserve_exact_unchecked(&mut self, size: usize) -> SendReservation<'_, T, N>
-    where
-        T: Copy,
-    {
-        let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
-        let last_abs_index = self.buffer.capacity;
-        let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
-        let to_abs_index = from_abs_index + size;
-
-        let (s1, s1_remaining, s2, s2_remaining) = if to_abs_index < last_abs_index {
-            let s_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            (s_ptr, size, std::ptr::null_mut(), 0)
-        } else {
-            let s1_len = last_abs_index - from_abs_index;
-            let s1_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
-            let s2_len = size - s1_len;
-            let s2_ptr = unsafe { self.get_slice_ptr(0, 0) };
-
-            (s1_ptr, s1_len, s2_ptr, s2_len)
-        };
-
-        SendReservation {
-            tx: self,
-            s1,
-            s1_remaining,
-            s2,
-            s2_remaining,
-            total_reserved: size,
-            start_cl_index: curr_cl_index,
-            start_cl_offset: curr_cl_offset,
-        }
     }
 
     pub fn flush(&mut self) -> Result<(), Error> {
