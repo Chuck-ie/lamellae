@@ -6,7 +6,6 @@ use crate::{SlotPtr, buffer::Buffer, spinlock::Spinlock};
 pub enum Error {
     QueueFull,
     BatchTooLarge,
-    NothingToFlush,
 }
 
 pub struct Producer<T, const N: usize> {
@@ -79,17 +78,15 @@ impl<T, const N: usize> Producer<T, N> {
     {
         let max_batch_size = self.buffer.max_size();
         let size = buf.len().min(max_batch_size);
-        let final_batch_size = size.min(self.continuous_free());
+        let mut final_batch_size = size.min(self.continuous_free());
 
         if final_batch_size == 0 {
             self.refresh_cached_cl_read();
-            let final_batch_size = size.min(self.continuous_free());
+            final_batch_size = size.min(self.continuous_free());
 
             if final_batch_size == 0 {
                 return Err(Error::QueueFull);
             }
-
-            return Ok(unsafe { self.send_batch_exact_unchecked(&buf[0..final_batch_size]) });
         }
 
         Ok(unsafe { self.send_batch_exact_unchecked(&buf[0..final_batch_size]) })
@@ -107,6 +104,7 @@ impl<T, const N: usize> Producer<T, N> {
 
         if size > self.continuous_free() {
             self.refresh_cached_cl_read();
+
             if size > self.continuous_free() {
                 return Err(Error::QueueFull);
             }
@@ -128,15 +126,15 @@ impl<T, const N: usize> Producer<T, N> {
         let to_abs_index = from_abs_index + batch_size;
 
         if to_abs_index < last_abs_index {
-            let s_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
+            let s_ptr = unsafe { self.buffer.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
             unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), s_ptr, batch_size) };
         } else {
             let s1_len = last_abs_index - from_abs_index;
-            let s1_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
+            let s1_ptr = unsafe { self.buffer.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
             unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), s1_ptr, s1_len) };
 
             let s2_len = batch_size - s1_len;
-            let s2_ptr = unsafe { self.get_slice_ptr(0, 0) };
+            let s2_ptr = unsafe { self.buffer.get_slice_ptr_mut(0, 0) };
             unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr().add(s1_len), s2_ptr, s2_len) };
         }
 
@@ -153,6 +151,51 @@ impl<T, const N: usize> Producer<T, N> {
         self.buffer.head.store(next_cl_index, Ordering::Release);
 
         batch_size
+    }
+
+    pub fn try_send_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
+    where
+        F: FnOnce(&mut [T], &mut [T]),
+    {
+        let max_batch_size = self.buffer.max_size();
+        let continuous_free = self.continuous_free();
+        let mut batch_size = size.min(max_batch_size).min(continuous_free);
+
+        if batch_size == 0 {
+            self.refresh_cached_cl_read();
+            batch_size = size.min(self.continuous_free());
+        }
+
+        if batch_size == 0 {
+            return Err(Error::QueueFull);
+        }
+
+        let (s1, s2) = unsafe { self.buffer.as_slice_mut(self.slot_ptr, batch_size) };
+        with(s1, s2);
+
+        Ok(batch_size)
+    }
+
+    pub fn try_send_exact_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
+    where
+        F: FnOnce(&mut [T], &mut [T]),
+    {
+        if size > self.buffer.max_size() {
+            return Err(Error::BatchTooLarge);
+        }
+
+        if size > self.continuous_free() {
+            self.refresh_cached_cl_read();
+
+            if size > self.continuous_free() {
+                return Err(Error::QueueFull);
+            }
+        }
+
+        let (s1, s2) = unsafe { self.buffer.as_slice_mut(self.slot_ptr, size) };
+        with(s1, s2);
+
+        Ok(size)
     }
 
     pub fn flush(&mut self) -> Result<(), Error> {
@@ -180,19 +223,6 @@ impl<T, const N: usize> Producer<T, N> {
         self.buffer.head.store(next_head, Ordering::Release);
 
         Ok(())
-    }
-
-    // Safety: the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
-    // is within the ring buffers bounds
-    #[inline]
-    unsafe fn get_slice_ptr(&self, cl_index: usize, cl_offset: usize) -> *mut T {
-        unsafe {
-            self.buffer
-                .inner
-                .get_unchecked(cl_index)
-                .get_item_ptr(cl_offset)
-                .cast::<T>()
-        }
     }
 
     #[inline]

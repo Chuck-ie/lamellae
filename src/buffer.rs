@@ -62,4 +62,89 @@ impl<T, const N: usize> Buffer<T, N> {
     pub(crate) const fn max_size(&self) -> usize {
         self.capacity - N
     }
+
+    // # Safety:
+    //
+    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
+    // is within the ring buffers bounds
+    #[inline]
+    pub(crate) unsafe fn get_slice_ptr(&self, cl_index: usize, cl_offset: usize) -> *const T {
+        unsafe {
+            self.inner
+                .get_unchecked(cl_index)
+                .get_item_ptr(cl_offset)
+                .cast::<T>()
+                .cast_const()
+        }
+    }
+
+    // # Safety:
+    //
+    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
+    // is within the ring buffers bounds
+    #[inline]
+    pub(crate) unsafe fn get_slice_ptr_mut(&self, cl_index: usize, cl_offset: usize) -> *mut T {
+        unsafe {
+            self.inner
+                .get_unchecked(cl_index)
+                .get_item_ptr(cl_offset)
+                .cast::<T>()
+        }
+    }
+
+    pub(crate) unsafe fn as_slice(&self, from: SlotPtr, len: usize) -> (&[T], &[T]) {
+        let (curr_cl_index, curr_cl_offset) = from.into();
+        let last_abs_index = self.capacity;
+        let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
+        let to_abs_index = from_abs_index + len;
+
+        let slices: (&[T], &[T]) = if to_abs_index < last_abs_index {
+            let s_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
+            let s_slice = unsafe { core::slice::from_raw_parts(s_ptr, len) };
+
+            (s_slice, &[])
+        } else {
+            let s1_len = last_abs_index - from_abs_index;
+            let s1_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
+            let s1_slice = unsafe { core::slice::from_raw_parts(s1_ptr, s1_len) };
+
+            let s2_len = len - s1_len;
+            let s2_ptr = unsafe { self.get_slice_ptr_mut(0, 0) };
+            let s2_slice = unsafe { core::slice::from_raw_parts(s2_ptr, s2_len) };
+
+            (s1_slice, s2_slice)
+        };
+
+        slices
+    }
+
+    pub(crate) unsafe fn as_slice_mut<'a>(
+        &self,
+        from: SlotPtr,
+        len: usize,
+    ) -> (&'a mut [T], &'a mut [T]) {
+        let (curr_cl_index, curr_cl_offset) = from.into();
+        let last_abs_index = self.capacity;
+        let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
+        let to_abs_index = from_abs_index + len;
+
+        let slices: (&mut [T], &mut [T]) = if to_abs_index < last_abs_index {
+            let s_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
+            let s_slice = unsafe { core::slice::from_raw_parts_mut(s_ptr, len) };
+
+            (s_slice, &mut [])
+        } else {
+            let s1_len = last_abs_index - from_abs_index;
+            let s1_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
+            let s1_slice = unsafe { core::slice::from_raw_parts_mut(s1_ptr, s1_len) };
+
+            let s2_len = len - s1_len;
+            let s2_ptr = unsafe { self.get_slice_ptr_mut(0, 0) };
+            let s2_slice = unsafe { core::slice::from_raw_parts_mut(s2_ptr, s2_len) };
+
+            (s1_slice, s2_slice)
+        };
+
+        slices
+    }
 }

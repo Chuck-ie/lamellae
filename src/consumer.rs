@@ -133,15 +133,15 @@ impl<T, const N: usize> Consumer<T, N> {
         let to_abs_index = from_abs_index + batch_size;
 
         if to_abs_index < last_abs_index {
-            let s_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
+            let s_ptr = unsafe { self.buffer.get_slice_ptr(curr_cl_index, curr_cl_offset) };
             unsafe { core::ptr::copy_nonoverlapping(s_ptr, buf.as_mut_ptr(), batch_size) };
         } else {
             let s1_len = last_abs_index - from_abs_index;
-            let s1_ptr = unsafe { self.get_slice_ptr(curr_cl_index, curr_cl_offset) };
+            let s1_ptr = unsafe { self.buffer.get_slice_ptr(curr_cl_index, curr_cl_offset) };
             unsafe { core::ptr::copy_nonoverlapping(s1_ptr, buf.as_mut_ptr(), s1_len) };
 
             let s2_len = batch_size - s1_len;
-            let s2_ptr = unsafe { self.get_slice_ptr(0, 0) };
+            let s2_ptr = unsafe { self.buffer.get_slice_ptr(0, 0) };
             unsafe { core::ptr::copy_nonoverlapping(s2_ptr, buf.as_mut_ptr().add(s1_len), s2_len) };
         }
 
@@ -158,6 +158,47 @@ impl<T, const N: usize> Consumer<T, N> {
         self.buffer.tail.store(next_cl_index, Ordering::Release);
 
         batch_size
+    }
+
+    pub fn try_recv_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
+    where
+        F: FnOnce(&[T], &[T]),
+    {
+        let max_batch_size = self.buffer.max_size();
+        let size = size.min(max_batch_size);
+
+        if size == 0 {
+            return Err(Error::QueueEmpty);
+        }
+
+        let final_batch_size = size.min(self.continuous_used());
+
+        if final_batch_size == 0 {
+            return Err(Error::QueueEmpty);
+        }
+
+        let (s1, s2) = unsafe { self.buffer.as_slice(self.slot_ptr, final_batch_size) };
+        with(s1, s2);
+
+        Ok(final_batch_size)
+    }
+
+    pub fn try_send_exact_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
+    where
+        F: FnOnce(&mut [T], &mut [T]),
+    {
+        if size > self.buffer.max_size() {
+            return Err(Error::BatchTooLarge);
+        }
+
+        if size > self.continuous_used() {
+            return Err(Error::QueueEmpty);
+        }
+
+        let (s1, s2) = unsafe { self.buffer.as_slice_mut(self.slot_ptr, size) };
+        with(s1, s2);
+
+        Ok(size)
     }
 
     fn continuous_used(&mut self) -> usize {
@@ -212,22 +253,6 @@ impl<T, const N: usize> Consumer<T, N> {
         }
 
         self.cached_cl_write = new_bound;
-    }
-
-    // # Safety:
-    //
-    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
-    // is within the ring buffers bounds
-    #[inline]
-    unsafe fn get_slice_ptr(&self, cl_index: usize, cl_offset: usize) -> *const T {
-        unsafe {
-            self.buffer
-                .inner
-                .get_unchecked(cl_index)
-                .get_item_ptr(cl_offset)
-                .cast::<T>()
-                .cast_const()
-        }
     }
 }
 
