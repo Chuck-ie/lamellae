@@ -28,8 +28,6 @@ strip = false
 opt-level = 3
 codegen-units = 1
 lto = true
-split-debuginfo = "off"
-force-frame-pointers = true
 
 [[bench]]
 name = "benches"

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::SlotPtr;
 
@@ -9,11 +9,9 @@ pub struct InterruptionTracker {
 
 impl InterruptionTracker {
     pub const fn new() -> Self {
-        let initial = std::ptr::null_mut();
-
         Self {
-            head: AtomicPtr::new(initial),
-            tail: AtomicPtr::new(initial),
+            head: AtomicPtr::new(core::ptr::null_mut()),
+            tail: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 

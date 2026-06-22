@@ -1,4 +1,5 @@
-use std::sync::{Arc, atomic::AtomicUsize};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::{
     SlotPtr,
@@ -63,59 +64,41 @@ impl<T, const N: usize> Buffer<T, N> {
         self.capacity - N
     }
 
-    // # Safety:
-    //
-    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
-    // is within the ring buffers bounds
     #[inline]
-    pub(crate) unsafe fn get_slice_ptr(&self, cl_index: usize, cl_offset: usize) -> *const T {
-        unsafe {
-            self.inner
-                .get_unchecked(cl_index)
-                .get_item_ptr(cl_offset)
-                .cast::<T>()
-                .cast_const()
-        }
-    }
+    pub(crate) fn advance_slot_ptr(
+        &self,
+        slot_ptr: &mut SlotPtr,
+        by: usize,
+        counter: &AtomicUsize,
+        ordering: Ordering,
+    ) {
+        let (curr_cl_index, curr_cl_offset) = (*slot_ptr).into();
+        let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
+        let to_abs_index = from_abs_index + by;
+        let final_abs_index = to_abs_index % self.capacity;
 
-    // # Safety:
-    //
-    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
-    // is within the ring buffers bounds
-    #[inline]
-    pub(crate) unsafe fn get_slice_ptr_mut(&self, cl_index: usize, cl_offset: usize) -> *mut T {
-        unsafe {
-            self.inner
-                .get_unchecked(cl_index)
-                .get_item_ptr(cl_offset)
-                .cast::<T>()
-        }
+        let cl_index = (final_abs_index / N) & self.cl_mask;
+        let cl_offset = final_abs_index % N;
+
+        let (next_cl_index, next_cl_offset) = if cl_offset == 0 && to_abs_index > 0 {
+            (cl_index.wrapping_sub(1) & self.cl_mask, N)
+        } else {
+            (cl_index, cl_offset)
+        };
+
+        slot_ptr.set(next_cl_index, next_cl_offset);
+        counter.store(next_cl_index, ordering);
     }
 
     pub(crate) unsafe fn as_slice(&self, from: SlotPtr, len: usize) -> (&[T], &[T]) {
-        let (curr_cl_index, curr_cl_offset) = from.into();
-        let last_abs_index = self.capacity;
-        let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
-        let to_abs_index = from_abs_index + len;
+        let (s1_ptr, s1_len, s2_ptr, s2_len) = unsafe { self.slice_ptr_pair(from, len) };
 
-        let slices: (&[T], &[T]) = if to_abs_index < last_abs_index {
-            let s_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
-            let s_slice = unsafe { core::slice::from_raw_parts(s_ptr, len) };
-
-            (s_slice, &[])
-        } else {
-            let s1_len = last_abs_index - from_abs_index;
-            let s1_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
-            let s1_slice = unsafe { core::slice::from_raw_parts(s1_ptr, s1_len) };
-
-            let s2_len = len - s1_len;
-            let s2_ptr = unsafe { self.get_slice_ptr_mut(0, 0) };
-            let s2_slice = unsafe { core::slice::from_raw_parts(s2_ptr, s2_len) };
-
-            (s1_slice, s2_slice)
-        };
-
-        slices
+        unsafe {
+            (
+                core::slice::from_raw_parts(s1_ptr, s1_len),
+                core::slice::from_raw_parts(s2_ptr, s2_len),
+            )
+        }
     }
 
     pub(crate) unsafe fn as_slice_mut<'a>(
@@ -123,28 +106,75 @@ impl<T, const N: usize> Buffer<T, N> {
         from: SlotPtr,
         len: usize,
     ) -> (&'a mut [T], &'a mut [T]) {
+        let (s1_ptr, s1_len, s2_ptr, s2_len) = unsafe { self.slice_ptr_pair(from, len) };
+
+        unsafe {
+            (
+                core::slice::from_raw_parts_mut(s1_ptr, s1_len),
+                core::slice::from_raw_parts_mut(s2_ptr, s2_len),
+            )
+        }
+    }
+
+    #[inline]
+    unsafe fn slice_ptr_pair(&self, from: SlotPtr, len: usize) -> (*mut T, usize, *mut T, usize) {
         let (curr_cl_index, curr_cl_offset) = from.into();
-        let last_abs_index = self.capacity;
         let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
         let to_abs_index = from_abs_index + len;
 
-        let slices: (&mut [T], &mut [T]) = if to_abs_index < last_abs_index {
-            let s_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
-            let s_slice = unsafe { core::slice::from_raw_parts_mut(s_ptr, len) };
+        let s1_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
+        let s2_ptr = unsafe { self.get_slice_ptr_mut(0, 0) };
 
-            (s_slice, &mut [])
+        if to_abs_index <= self.capacity {
+            (s1_ptr, len, s2_ptr, 0)
         } else {
-            let s1_len = last_abs_index - from_abs_index;
-            let s1_ptr = unsafe { self.get_slice_ptr_mut(curr_cl_index, curr_cl_offset) };
-            let s1_slice = unsafe { core::slice::from_raw_parts_mut(s1_ptr, s1_len) };
-
+            let s1_len = self.capacity - from_abs_index;
             let s2_len = len - s1_len;
-            let s2_ptr = unsafe { self.get_slice_ptr_mut(0, 0) };
-            let s2_slice = unsafe { core::slice::from_raw_parts_mut(s2_ptr, s2_len) };
+            (s1_ptr, s1_len, s2_ptr, s2_len)
+        }
+    }
 
-            (s1_slice, s2_slice)
-        };
+    // Safety:
+    //
+    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
+    // is within the ring buffers bounds
+    #[inline]
+    unsafe fn get_slice_ptr_mut(&self, cl_index: usize, cl_offset: usize) -> *mut T {
+        unsafe {
+            self.inner
+                .get_unchecked(cl_index)
+                .get_slot_ptr(cl_offset)
+                .cast::<T>()
+        }
+    }
+}
 
-        slices
+#[inline]
+pub(crate) fn clamp_batch_size<E>(
+    requested: usize,
+    max_size: usize,
+    available: usize,
+    empty_err: E,
+) -> Result<usize, E> {
+    match requested.min(max_size).min(available) {
+        0 => Err(empty_err),
+        size => Ok(size),
+    }
+}
+
+#[inline]
+pub(crate) fn validate_exact_batch_size<E>(
+    requested: usize,
+    max_size: usize,
+    available: usize,
+    empty_err: E,
+    too_large_err: E,
+) -> Result<usize, E> {
+    if requested > max_size {
+        Err(too_large_err)
+    } else if requested > available {
+        Err(empty_err)
+    } else {
+        Ok(requested)
     }
 }
