@@ -1,8 +1,8 @@
 pub mod buffer;
 pub mod consumer;
+mod interruption_tracker;
 pub mod producer;
 pub mod reservation;
-mod slot_tracker;
 mod spinlock;
 mod wrapper;
 
@@ -46,7 +46,7 @@ macro_rules! channel {
     }};
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct SlotPtr {
     cl_index: usize,
     cl_offset: usize,

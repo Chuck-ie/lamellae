@@ -72,15 +72,10 @@ fn bench_lamellae_reservation() -> Duration {
         let mut sum = 0;
         let mut recv_buf = [0; BATCH_SIZE];
 
-        for _ in 0..BATCH_COUNT {
-            let mut reservation = loop {
-                if let Ok(res) = rx.try_reserve_exact(BATCH_SIZE) {
-                    break res;
-                }
+        for batch in 0..BATCH_COUNT {
+            while rx.try_recv_batch_exact(&mut recv_buf).is_err() {
                 thread::yield_now();
-            };
-
-            reservation.recv_slice(&mut recv_buf);
+            }
 
             for msg in &recv_buf {
                 sum += msg;
@@ -99,14 +94,9 @@ fn bench_lamellae_reservation() -> Duration {
         }
 
         {
-            let mut reservation = loop {
-                if let Ok(res) = tx.try_reserve_exact(BATCH_SIZE) {
-                    break res;
-                }
+            while tx.try_send_batch_exact(&local_buf).is_err() {
                 thread::yield_now();
-            };
-
-            reservation.send_slice(&local_buf);
+            }
         }
     }
 

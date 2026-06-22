@@ -6,11 +6,13 @@ use crate::{SlotPtr, buffer::Buffer, reservation::SendReservation, spinlock::Spi
 pub enum Error {
     QueueFull,
     BatchTooLarge,
+    NothingToFlush,
 }
 
 pub struct Producer<T, const N: usize> {
     pub(crate) buffer: Arc<Buffer<T, N>>,
     pub(crate) slot_ptr: SlotPtr,
+    cached_cl_read: SlotPtr,
 }
 
 impl<T, const N: usize> Producer<T, N> {
@@ -18,6 +20,7 @@ impl<T, const N: usize> Producer<T, N> {
         Self {
             buffer: buffer.clone(),
             slot_ptr: SlotPtr::from((0, 0)),
+            cached_cl_read: SlotPtr::from((buffer.cl_mask, N)),
         }
     }
 
@@ -39,24 +42,17 @@ impl<T, const N: usize> Producer<T, N> {
         let (curr_head, curr_cl_head) = self.slot_ptr.into();
 
         // slow path when trying to wrap around at a cache line border
-        // if we finished writing to a cache line in the previous send
         if curr_cl_head == N {
-            // Calculate the index of the next cache line by wrapping around buffer bounds using
-            // fast modulo since cache_lines is always a power of 2
             let next_head = (curr_head + 1) & self.buffer.cl_mask;
 
-            // Sync with the reader's release when advancing its tail
-            let curr_tail = self.buffer.tail.load(Ordering::Acquire);
-
-            if next_head == curr_tail {
-                return Err((value, Error::QueueFull));
+            if next_head == self.cached_cl_read.cl_index {
+                self.refresh_cached_cl_read();
+                if next_head == self.cached_cl_read.cl_index {
+                    return Err((value, Error::QueueFull));
+                }
             }
 
-            let lo_ptr = SlotPtr::from((curr_head, 0));
-            let hi_ptr = SlotPtr::from((next_head, 0));
-            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
-
-            // Safety: next_head is verified to not overlap with curr_tail and is within bounds
+            // Safety: next_head is verified to not overlap with the reader and is within bounds
             let next_cache_line = unsafe { self.buffer.get_cache_line(next_head) };
             unsafe { next_cache_line.write(0, value) };
 
@@ -81,13 +77,19 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
-        let max_batch_size = self.buffer.capacity - N;
-        let batch_size = buf.len().min(max_batch_size);
-        let continuous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
-        let final_batch_size = batch_size.min(continuous_free);
+        let max_batch_size = self.buffer.max_size();
+        let size = buf.len().min(max_batch_size);
+        let final_batch_size = size.min(self.continuous_free());
 
         if final_batch_size == 0 {
-            return Err(Error::QueueFull);
+            self.refresh_cached_cl_read();
+            let final_batch_size = size.min(self.continuous_free());
+
+            if final_batch_size == 0 {
+                return Err(Error::QueueFull);
+            }
+
+            return Ok(unsafe { self.send_batch_exact_unchecked(&buf[0..final_batch_size]) });
         }
 
         Ok(unsafe { self.send_batch_exact_unchecked(&buf[0..final_batch_size]) })
@@ -97,23 +99,23 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
-        let batch_size = buf.len();
-        let max_batch_size = self.buffer.capacity - N;
+        let size = buf.len();
 
-        if batch_size > max_batch_size {
+        if size > self.buffer.max_size() {
             return Err(Error::BatchTooLarge);
         }
 
-        let continuous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
-
-        if batch_size > continuous_free {
-            return Err(Error::QueueFull);
+        if size > self.continuous_free() {
+            self.refresh_cached_cl_read();
+            if size > self.continuous_free() {
+                return Err(Error::QueueFull);
+            }
         }
 
         Ok(unsafe { self.send_batch_exact_unchecked(buf) })
     }
 
-    // # Safety: The caller has to make sure to validate that there are buf.len()
+    // Safety: The caller has to make sure to validate that there are buf.len()
     // items free to write to the buffer
     unsafe fn send_batch_exact_unchecked(&mut self, buf: &[T]) -> usize
     where
@@ -148,17 +150,6 @@ impl<T, const N: usize> Producer<T, N> {
         }
 
         self.slot_ptr.set(next_cl_index, next_cl_offset);
-        let mut i = curr_cl_index;
-
-        while i != next_cl_index {
-            let curr = i;
-            let next = (i + 1) & self.buffer.cl_mask;
-            let lo_ptr = SlotPtr::from((curr, 0));
-            let hi_ptr = SlotPtr::from((next, 0));
-            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
-            i = next;
-        }
-
         self.buffer.head.store(next_cl_index, Ordering::Release);
 
         batch_size
@@ -168,12 +159,16 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
-        let max_batch_size = self.buffer.capacity - N;
-        let continuous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
-        let reservation_size = size.min(max_batch_size).min(continuous_free);
+        let max_batch_size = self.buffer.max_size();
+        let reservation_size = size.min(max_batch_size).min(self.continuous_free());
 
         if reservation_size == 0 {
-            return Err(Error::QueueFull);
+            self.refresh_cached_cl_read();
+            let reservation_size = size.min(max_batch_size).min(self.continuous_free());
+
+            if reservation_size == 0 {
+                return Err(Error::QueueFull);
+            }
         }
 
         Ok(unsafe { self.reserve_exact_unchecked(reservation_size) })
@@ -183,16 +178,18 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
-        let max_batch_size = self.buffer.capacity - N;
+        let max_batch_size = self.buffer.max_size();
 
         if size > max_batch_size {
             return Err(Error::BatchTooLarge);
         }
 
-        let continous_free = self.buffer.slot_tracker.next_free(self.slot_ptr);
+        if size > self.continuous_free() {
+            self.refresh_cached_cl_read();
 
-        if size > continous_free {
-            return Err(Error::QueueFull);
+            if size > self.continuous_free() {
+                return Err(Error::QueueFull);
+            }
         }
 
         Ok(unsafe { self.reserve_exact_unchecked(size) })
@@ -233,23 +230,23 @@ impl<T, const N: usize> Producer<T, N> {
 
     pub fn flush(&mut self) -> Result<(), Error> {
         let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
-        let next_head = (curr_cl_index + 1) & self.buffer.cl_mask;
 
-        // Sync with the reader's release when advancing its tail
-        let curr_tail = self.buffer.tail.load(Ordering::Acquire);
-
-        if next_head == curr_tail {
-            return Err(Error::QueueFull);
+        if curr_cl_offset == 0 {
+            return Ok(());
         }
 
-        if curr_cl_offset == N {
-            let lo_ptr = SlotPtr::from((curr_cl_index, 0));
-            let hi_ptr = SlotPtr::from((next_head, 0));
-            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
-        } else {
-            let lo_ptr = SlotPtr::from((curr_cl_index, 0));
-            let hi_ptr = SlotPtr::from((curr_cl_index, curr_cl_offset));
-            self.buffer.slot_tracker.mark_used(lo_ptr, hi_ptr);
+        let next_head = (curr_cl_index + 1) & self.buffer.cl_mask;
+
+        if next_head == self.cached_cl_read.cl_index {
+            self.refresh_cached_cl_read();
+
+            if next_head == self.cached_cl_read.cl_index {
+                return Err(Error::QueueFull);
+            }
+        }
+
+        if curr_cl_offset < N {
+            self.buffer.interruptions.push(self.slot_ptr);
         }
 
         self.slot_ptr.set(next_head, 0);
@@ -258,7 +255,7 @@ impl<T, const N: usize> Producer<T, N> {
         Ok(())
     }
 
-    // # Safety: the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
+    // Safety: the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
     // is within the ring buffers bounds
     #[inline]
     unsafe fn get_slice_ptr(&self, cl_index: usize, cl_offset: usize) -> *mut T {
@@ -269,6 +266,26 @@ impl<T, const N: usize> Producer<T, N> {
                 .get_item_ptr(cl_offset)
                 .cast::<T>()
         }
+    }
+
+    #[inline]
+    fn continuous_free(&self) -> usize {
+        let (head_cl_index, head_cl_offset) = self.slot_ptr.into();
+        let cached_cl_index = self.cached_cl_read.cl_index;
+
+        let free_cache_lines =
+            cached_cl_index.wrapping_sub(head_cl_index).wrapping_sub(1) & self.buffer.cl_mask;
+
+        let free_slots_total = free_cache_lines * N;
+        let free_slots_curr_cl = N - head_cl_offset;
+
+        free_slots_total + free_slots_curr_cl
+    }
+
+    #[inline]
+    fn refresh_cached_cl_read(&mut self) {
+        let curr_tail = self.buffer.tail.load(Ordering::Acquire);
+        self.cached_cl_read.set(curr_tail, N);
     }
 }
 
@@ -282,81 +299,7 @@ mod producer_tests {
 
     type TestMessage = usize;
 
-    #[test]
-    fn test_free_slots_one_cl() {
-        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
-
-        assert_eq!(
-            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
-            TOTAL_CAPACITY - CL_CAPACITY
-        );
-
-        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
-        assert!(tx.flush().is_ok());
-        assert_eq!(
-            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
-            TOTAL_CAPACITY - 2 * CL_CAPACITY
-        );
-
-        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
-        assert_eq!(
-            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
-            TOTAL_CAPACITY - CL_CAPACITY
-        );
-    }
-
-    #[test]
-    fn test_free_slots_mul_cl() {
-        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
-
-        assert_eq!(
-            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
-            TOTAL_CAPACITY - CL_CAPACITY
-        );
-
-        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
-        assert!(tx.flush().is_ok());
-        assert_eq!(
-            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
-            TOTAL_CAPACITY - 2 * CL_CAPACITY
-        );
-
-        assert!(rx.try_recv_batch(&mut [0; CL_CAPACITY]).is_ok());
-        assert_eq!(
-            tx.buffer.slot_tracker.next_free(tx.slot_ptr),
-            TOTAL_CAPACITY - CL_CAPACITY
-        );
-    }
-
-    #[test]
-    fn test_flush_cl_full() {
-        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-        let cl_index = tx.slot_ptr.cl_index;
-        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
-
-        let before_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
-        assert_eq!(before_flush, 0);
-
-        assert!(tx.flush().is_ok());
-
-        let after_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
-        assert_eq!(after_flush, CL_CAPACITY);
-    }
-
-    #[test]
-    fn test_flush_cl_partial() {
-        let (mut tx, _) = channel!(TestMessage, TOTAL_CAPACITY);
-        let cl_index = tx.slot_ptr.cl_index;
-        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
-
-        let before_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
-        assert_eq!(before_flush, 0);
-
-        assert!(tx.flush().is_ok());
-
-        let after_flush = tx.buffer.slot_tracker.occupied_in_cl(cl_index);
-        assert_eq!(after_flush, CL_CAPACITY / 2);
-    }
+    // TODO: add updated flush tests
 
     #[test]
     fn test_wrapping_is_lazy() {

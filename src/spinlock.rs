@@ -18,6 +18,7 @@ impl Spinlock {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn spin(&mut self) -> bool {
         let spins = 1 << self.spin_count.min(SOFT_LIMIT);
 

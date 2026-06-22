@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use lamellae::channel;
 
-const MESSAGE_COUNT: u64 = 1_000_000_000;
+// const MESSAGE_COUNT: u64 = 1_000_000_000;
+const MESSAGE_COUNT: u64 = 5_000_000;
 type Message = u64;
 
 fn bench_lamellae() -> Duration {
@@ -136,10 +137,10 @@ fn criterion_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-fn main() {
-    let elapsed = bench_lamellae();
-    println!("elapsed: {}", elapsed.as_millis());
-}
+// fn main() {
+//     let elapsed = bench_lamellae();
+//     println!("elapsed: {}", elapsed.as_millis());
+// }
 
-// criterion_group!(benches, criterion_benchmarks);
-// criterion_main!(benches);
+criterion_group!(benches, criterion_benchmarks);
+criterion_main!(benches);

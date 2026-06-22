@@ -11,15 +11,16 @@ pub enum Error {
 pub struct Consumer<T, const N: usize, const CLS: usize = 0> {
     pub(crate) buffer: Arc<Buffer<T, N>>,
     pub(crate) slot_ptr: SlotPtr,
-    cl_write_count: usize,
+    cached_cl_write: SlotPtr,
 }
 
 impl<T, const N: usize> Consumer<T, N> {
     pub(crate) fn new(buffer: &Arc<Buffer<T, N>>) -> Self {
+        let curr_ptr = SlotPtr::from((buffer.cl_mask, N));
         Self {
             buffer: buffer.clone(),
-            slot_ptr: SlotPtr::from((buffer.cl_mask, N)),
-            cl_write_count: N,
+            slot_ptr: curr_ptr,
+            cached_cl_write: curr_ptr,
         }
     }
 
@@ -36,44 +37,42 @@ impl<T, const N: usize> Consumer<T, N> {
 
     pub fn try_recv(&mut self) -> Result<T, Error> {
         let (curr_cl_index, curr_cl_offset) = self.slot_ptr.into();
-        let curr_cl_write_count = self.cl_write_count;
 
-        // If we finished reading from a cache line in the previous recv
-        if curr_cl_offset == curr_cl_write_count {
-            // Calculate the index of the next cache line by wrapping around buffer bounds using
-            // fast modulo since cache_lines is always a power of 2
+        // slow path: refresh cache, jump past gap
+        if self.slot_ptr == self.cached_cl_write {
             let next_cl_index = (curr_cl_index + 1) & self.buffer.cl_mask;
-
-            // Sync with the writer's release when advancing its head
             let curr_head = self.buffer.head.load(Ordering::Acquire);
-
             if next_cl_index == curr_head {
                 return Err(Error::QueueEmpty);
             }
 
-            // Safety: curr_tail is verified against curr_head and is within bounds
-            let hi_ptr = SlotPtr::from((next_cl_index, 0));
-            self.buffer.slot_tracker.mark_free(hi_ptr);
+            if let Some(intr) = self.buffer.interruptions.pop_next() {
+                self.cached_cl_write = intr;
+            } else {
+                let prev_head = curr_head.wrapping_sub(1) & self.buffer.cl_mask;
+                self.cached_cl_write = SlotPtr::from((prev_head, N));
+            }
 
-            // Safety: next_tail is verified against curr_head and is within bounds
             let next_cache_line = unsafe { self.buffer.get_cache_line(next_cl_index) };
             let value = unsafe { next_cache_line.read(0) };
-            let next_write_count = self.buffer.slot_tracker.occupied_in_cl(next_cl_index);
-
-            self.cl_write_count = next_write_count;
             self.slot_ptr.set(next_cl_index, 1);
-
-            // Sync the advancement with the write thread
             self.buffer.tail.store(next_cl_index, Ordering::Release);
-
             Ok(value)
-        } else {
-            // Safety: curr_tail is always within bounds and guaranteed not to
-            // reach the write head because we checked for empty state previously.
+        }
+        // fast path: cl crossing inside cached range
+        else if curr_cl_offset == N {
+            let next_cl_index = (curr_cl_index + 1) & self.buffer.cl_mask;
+            let next_cache_line = unsafe { self.buffer.get_cache_line(next_cl_index) };
+            let value = unsafe { next_cache_line.read(0) };
+            self.slot_ptr.set(next_cl_index, 1);
+            self.buffer.tail.store(next_cl_index, Ordering::Release);
+            Ok(value)
+        }
+        // fast path: same cl read
+        else {
             let cache_line = unsafe { self.buffer.get_cache_line(curr_cl_index) };
             let value = unsafe { cache_line.read(curr_cl_offset) };
             self.slot_ptr.cl_offset = curr_cl_offset + 1;
-
             Ok(value)
         }
     }
@@ -82,40 +81,46 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         T: Copy,
     {
-        let max_batch_size = self.buffer.capacity - N;
-        let batch_size = buf.len().min(max_batch_size);
+        let max_batch_size = self.buffer.max_size();
+        let size = buf.len().min(max_batch_size);
 
-        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
-        let final_batch_size = batch_size.min(continuous_used);
+        if size == 0 {
+            return Err(Error::QueueEmpty);
+        }
+
+        let final_batch_size = size.min(self.continuous_used());
 
         if final_batch_size == 0 {
             return Err(Error::QueueEmpty);
         }
 
-        Ok(unsafe { self.recv_batch_exact_unchecked(&mut buf[0..final_batch_size]) })
+        // Safety: final_batch_size <= continuous which was verified readable above
+        unsafe { self.recv_batch_exact_unchecked(&mut buf[..final_batch_size]) };
+
+        Ok(final_batch_size)
     }
 
     pub fn try_recv_batch_exact(&mut self, buf: &mut [T]) -> Result<usize, Error>
     where
         T: Copy,
     {
-        let batch_size = buf.len();
-        let max_batch_size = self.buffer.capacity - N;
+        let size = buf.len();
 
-        if batch_size > max_batch_size {
+        if size > self.buffer.max_size() {
             return Err(Error::BatchTooLarge);
         }
 
-        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
-
-        if batch_size > continuous_used {
+        if size > self.continuous_used() {
             return Err(Error::QueueEmpty);
         }
 
-        Ok(unsafe { self.recv_batch_exact_unchecked(buf) })
+        // Safety: batch_size <= continuous which was verified readable above
+        unsafe { self.recv_batch_exact_unchecked(buf) };
+
+        Ok(size)
     }
 
-    // # Safety: The caller has to make sure to validate that there are buf.len()
+    // Safety: The caller has to make sure to validate that there are buf.len()
     // items available to read inside the buffer
     unsafe fn recv_batch_exact_unchecked(&mut self, buf: &mut [T]) -> usize
     where
@@ -150,14 +155,6 @@ impl<T, const N: usize> Consumer<T, N> {
         }
 
         self.slot_ptr.set(next_cl_index, next_cl_offset);
-        let mut i = curr_cl_index;
-
-        while i != next_cl_index {
-            i = (i + 1) & self.buffer.cl_mask;
-            let hi_ptr = SlotPtr::from((i, 0));
-            self.buffer.slot_tracker.mark_free(hi_ptr);
-        }
-
         self.buffer.tail.store(next_cl_index, Ordering::Release);
 
         batch_size
@@ -167,14 +164,15 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         T: Copy,
     {
-        let max_batch_size = self.buffer.capacity - N;
-        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
-        let reservation_size = size.min(max_batch_size).min(continuous_used);
+        let max_batch_size = self.buffer.max_size();
+        let continuous = self.continuous_used();
+        let reservation_size = size.min(max_batch_size).min(continuous);
 
         if reservation_size == 0 {
             return Err(Error::QueueEmpty);
         }
 
+        // Safety: reservation_size <= continuous which was verified readable above
         Ok(unsafe { self.reserve_exact_unchecked(reservation_size) })
     }
 
@@ -182,18 +180,15 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         T: Copy,
     {
-        let max_batch_size = self.buffer.capacity - N;
-
-        if size > max_batch_size {
+        if size > self.buffer.max_size() {
             return Err(Error::BatchTooLarge);
         }
 
-        let continuous_used = self.buffer.slot_tracker.next_used(self.slot_ptr);
-
-        if size > continuous_used {
+        if size > self.continuous_used() {
             return Err(Error::QueueEmpty);
         }
 
+        // Safety: size <= continuous which was verified readable above
         Ok(unsafe { self.reserve_exact_unchecked(size) })
     }
 
@@ -230,7 +225,63 @@ impl<T, const N: usize> Consumer<T, N> {
         }
     }
 
-    // # Safety: the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
+    fn continuous_used(&mut self) -> usize {
+        self.try_extend_cached_cl_write();
+
+        let used = self.buffer.flat_dist(self.slot_ptr, self.cached_cl_write);
+
+        if used != 0 {
+            return used;
+        }
+
+        let (curr_cl_index, _) = self.slot_ptr.into();
+        let next_cl_index = (curr_cl_index + 1) & self.buffer.cl_mask;
+        let curr_head = self.buffer.head.load(Ordering::Acquire);
+
+        if next_cl_index == curr_head {
+            return 0;
+        }
+
+        if let Some(interruption) = self.buffer.interruptions.pop_next() {
+            self.cached_cl_write = interruption;
+        } else {
+            let prev_head = curr_head.wrapping_sub(1) & self.buffer.cl_mask;
+            self.cached_cl_write = SlotPtr::from((prev_head, N));
+        }
+
+        self.slot_ptr.set(next_cl_index, 0);
+        self.buffer.flat_dist(self.slot_ptr, self.cached_cl_write)
+    }
+
+    fn try_extend_cached_cl_write(&mut self) {
+        if self.cached_cl_write.cl_offset != N {
+            return;
+        }
+
+        let curr_head = self.buffer.head.load(Ordering::Acquire);
+        let new_bound = SlotPtr::from((curr_head.wrapping_sub(1) & self.buffer.cl_mask, N));
+
+        let extension = self.buffer.flat_dist(self.cached_cl_write, new_bound);
+
+        if extension == 0 {
+            return;
+        }
+
+        if let Some(intr) = self.buffer.interruptions.peek_next() {
+            let dist_to_intr = self.buffer.flat_dist(self.cached_cl_write, intr);
+
+            if dist_to_intr > 0 && dist_to_intr <= extension {
+                self.cached_cl_write = self.buffer.interruptions.pop_next().unwrap();
+                return;
+            }
+        }
+
+        self.cached_cl_write = new_bound;
+    }
+
+    // # Safety:
+    //
+    // the caller has to make sure that the index start_pos = (cl_index * N) + cl_offset
     // is within the ring buffers bounds
     #[inline]
     unsafe fn get_slice_ptr(&self, cl_index: usize, cl_offset: usize) -> *const T {
@@ -247,8 +298,10 @@ impl<T, const N: usize> Consumer<T, N> {
 
 #[cfg(test)]
 mod consumer_tests {
-    use crate::channel;
     use std::sync::atomic::Ordering;
+
+    use crate::channel;
+    use crate::consumer::Error;
 
     const CL_CAPACITY: usize = 8;
     const TOTAL_CAPACITY: usize = 4 * CL_CAPACITY;
@@ -257,25 +310,46 @@ mod consumer_tests {
 
     #[test]
     fn test_written_slots_one_cl() {
-        let (mut tx, rx) = channel!(TestMessage, TOTAL_CAPACITY);
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
 
-        assert_eq!(rx.buffer.slot_tracker.len(), 0);
+        let mut buf = [0usize; CL_CAPACITY];
+        assert_eq!(rx.try_recv_batch(&mut buf), Err(Error::QueueEmpty));
+
         assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
         assert!(tx.flush().is_ok());
-        assert_eq!(rx.buffer.slot_tracker.len(), CL_CAPACITY);
+
+        assert_eq!(rx.try_recv_batch(&mut buf), Ok(CL_CAPACITY));
     }
 
     #[test]
     fn test_written_slots_mul_cl() {
-        let (mut tx, rx) = channel!(TestMessage, TOTAL_CAPACITY);
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
 
-        assert_eq!(rx.buffer.slot_tracker.len(), 0);
         assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
         assert!(tx.flush().is_ok());
         assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
         assert!(tx.flush().is_ok());
 
-        assert_eq!(rx.buffer.slot_tracker.len(), CL_CAPACITY);
+        let mut buf = [0usize; CL_CAPACITY];
+        assert_eq!(rx.try_recv_batch(&mut buf), Ok(CL_CAPACITY / 2));
+        assert_eq!(rx.try_recv_batch(&mut buf), Ok(CL_CAPACITY / 2));
+    }
+
+    #[test]
+    fn test_batch_stops_at_interruption() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        let mut buf = [0usize; 2 * CL_CAPACITY];
+        let received = rx
+            .try_recv_batch(&mut buf)
+            .expect("batch should not be empty");
+        assert_eq!(received, CL_CAPACITY / 2);
     }
 
     #[test]

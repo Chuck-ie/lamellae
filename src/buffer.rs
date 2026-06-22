@@ -1,9 +1,10 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::{
+    SlotPtr,
     consumer::Consumer,
+    interruption_tracker::InterruptionTracker,
     producer::Producer,
-    slot_tracker::SlotTracker,
     wrapper::{CacheLine, CachePadded},
 };
 
@@ -14,7 +15,7 @@ pub struct Buffer<T, const N: usize> {
     pub(crate) head: CachePadded<AtomicUsize>,
     pub(crate) tail: CachePadded<AtomicUsize>,
     pub(crate) inner: Box<[CacheLine<T, N>]>,
-    pub(crate) slot_tracker: SlotTracker<N>,
+    pub(crate) interruptions: InterruptionTracker,
     pub(crate) cl_mask: usize,
     pub(crate) capacity: usize,
 }
@@ -32,7 +33,7 @@ impl<T, const N: usize> Buffer<T, N> {
             head: CachePadded(AtomicUsize::new(0)),
             tail: CachePadded(AtomicUsize::new(cache_line_mask)),
             inner,
-            slot_tracker: SlotTracker::new(capacity, cache_line_mask, 0),
+            interruptions: InterruptionTracker::new(),
             cl_mask: cache_line_mask,
             capacity,
         });
@@ -43,9 +44,22 @@ impl<T, const N: usize> Buffer<T, N> {
         (producer, consumer)
     }
 
-    // # Safety: the caller has to make sure that index is within bounds of the buffer
+    // Safety: the caller has to make sure that index is within bounds of the buffer
     #[inline]
     pub(crate) unsafe fn get_cache_line(&self, index: usize) -> &CacheLine<T, N> {
         unsafe { self.inner.get_unchecked(index) }
+    }
+
+    #[inline]
+    pub(crate) const fn flat_dist(&self, lo: SlotPtr, hi: SlotPtr) -> usize {
+        let slot_mask = self.capacity - 1;
+        let flat_lo = (lo.cl_index * N + lo.cl_offset) & slot_mask;
+        let flat_hi = (hi.cl_index * N + hi.cl_offset) & slot_mask;
+        flat_hi.wrapping_sub(flat_lo) & slot_mask
+    }
+
+    #[inline]
+    pub(crate) const fn max_size(&self) -> usize {
+        self.capacity - N
     }
 }
