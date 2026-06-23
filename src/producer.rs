@@ -87,7 +87,7 @@ impl<T, const N: usize> Producer<T, N> {
     where
         T: Copy,
     {
-        self.validate_batch_size_exact(buf.len())?;
+        self.validate_exact_batch_size(buf.len())?;
 
         Ok(unsafe { self.send_batch_exact_unchecked(buf) })
     }
@@ -124,25 +124,26 @@ impl<T, const N: usize> Producer<T, N> {
     {
         let size = self.clamp_batch_size(size)?;
 
-        let (s1, s2) = unsafe { self.buffer.as_slice_mut(self.slot_ptr, size) };
-        with(s1, s2);
-
-        self.buffer.advance_slot_ptr(
-            &mut self.slot_ptr,
-            size,
-            &self.buffer.head,
-            Ordering::Release,
-        );
-
-        Ok(size)
+        Ok(unsafe { self.send_exact_with(size, with) })
     }
 
     pub fn try_send_exact_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
     where
         F: FnOnce(&mut [T], &mut [T]),
     {
-        let size = self.validate_batch_size_exact(size)?;
+        let size = self.validate_exact_batch_size(size)?;
 
+        Ok(unsafe { self.send_exact_with(size, with) })
+    }
+
+    /// Safety:
+    ///
+    /// The caller has to make sure that size fits into the buffer and that size amount of slots
+    /// are free for writing. Otherwise this function causes UB
+    unsafe fn send_exact_with<F>(&mut self, size: usize, with: F) -> usize
+    where
+        F: FnOnce(&mut [T], &mut [T]),
+    {
         let (s1, s2) = unsafe { self.buffer.as_slice_mut(self.slot_ptr, size) };
         with(s1, s2);
 
@@ -153,7 +154,7 @@ impl<T, const N: usize> Producer<T, N> {
             Ordering::Release,
         );
 
-        Ok(size)
+        size
     }
 
     pub fn flush(&mut self) -> Result<(), Error> {
@@ -189,7 +190,7 @@ impl<T, const N: usize> Producer<T, N> {
         let cached_cl_index = self.cached_cl_read.cl_index;
 
         let free_cache_lines =
-            cached_cl_index.wrapping_sub(head_cl_index).wrapping_sub(1) & self.buffer.cl_mask;
+            cached_cl_index.wrapping_sub(head_cl_index + 1) & self.buffer.cl_mask;
 
         let free_slots_total = free_cache_lines * N;
         let free_slots_curr_cl = N - head_cl_offset;
@@ -198,34 +199,54 @@ impl<T, const N: usize> Producer<T, N> {
     }
 
     #[inline]
-    fn refresh_cached_cl_read(&mut self) {
-        let curr_tail = self.buffer.tail.load(Ordering::Acquire);
-        self.cached_cl_read.set(curr_tail, N);
-    }
-
-    #[inline]
     fn clamp_batch_size(&mut self, requested: usize) -> Result<usize, Error> {
-        self.refresh_cached_cl_read();
+        let max_size = self.buffer.max_size();
+        let available = self.continuous_free();
 
-        crate::buffer::clamp_batch_size(
-            requested,
-            self.buffer.max_size(),
-            self.continuous_free(),
-            Error::QueueFull,
-        )
+        if requested > available && requested <= max_size {
+            self.refresh_cached_cl_read();
+
+            return crate::buffer::clamp_batch_size(
+                requested,
+                max_size,
+                self.continuous_free(),
+                Error::QueueFull,
+            );
+        }
+
+        crate::buffer::clamp_batch_size(requested, max_size, available, Error::QueueFull)
     }
 
     #[inline]
-    fn validate_batch_size_exact(&mut self, requested: usize) -> Result<usize, Error> {
-        self.refresh_cached_cl_read();
+    fn validate_exact_batch_size(&mut self, requested: usize) -> Result<usize, Error> {
+        let max_size = self.buffer.max_size();
+        let available = self.continuous_free();
+
+        if requested > available {
+            self.refresh_cached_cl_read();
+
+            return crate::buffer::validate_exact_batch_size(
+                requested,
+                max_size,
+                self.continuous_free(),
+                Error::QueueFull,
+                Error::BatchTooLarge,
+            );
+        }
 
         crate::buffer::validate_exact_batch_size(
             requested,
-            self.buffer.max_size(),
-            self.continuous_free(),
+            max_size,
+            available,
             Error::QueueFull,
             Error::BatchTooLarge,
         )
+    }
+
+    #[inline]
+    fn refresh_cached_cl_read(&mut self) {
+        let curr_tail = self.buffer.tail.load(Ordering::Acquire);
+        self.cached_cl_read.set(curr_tail, N);
     }
 }
 

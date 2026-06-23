@@ -6,12 +6,12 @@ use lamellae::channel;
 
 // const BATCH_COUNT: u64 = 40_000;
 // const BATCH_SIZE: usize = 128;
-// const BATCH_COUNT: u64 = 20_000;
-// const BATCH_SIZE: usize = 256;
+const BATCH_COUNT: u64 = 20_000;
+const BATCH_SIZE: usize = 256;
 // const BATCH_COUNT: u64 = 10_000;
 // const BATCH_SIZE: usize = 512;
-const BATCH_COUNT: u64 = 25_000_000;
-const BATCH_SIZE: usize = 128;
+// const BATCH_COUNT: u64 = 25_000_000;
+// const BATCH_SIZE: usize = 128;
 const CAPACITY: usize = 16384;
 // const CAPACITY: usize = 2048;
 
@@ -61,7 +61,9 @@ fn bench_rtrb_batch() -> Duration {
         chunk.commit_all();
     }
 
-    let _sum = consumer_handle.join().unwrap();
+    let sum = consumer_handle.join().unwrap();
+    let n = BATCH_SIZE as u64 * BATCH_COUNT;
+    assert_eq!(sum, (n * (n - 1)) / 2);
     start.elapsed()
 }
 
@@ -101,7 +103,9 @@ fn bench_lamellae_batch() -> Duration {
     }
 
     while tx.flush().is_err() {}
-    let _sum = consumer_handle.join().unwrap();
+    let sum = consumer_handle.join().unwrap();
+    let n = BATCH_SIZE as u64 * BATCH_COUNT;
+    assert_eq!(sum, (n * (n - 1)) / 2);
     start.elapsed()
 }
 
@@ -155,7 +159,9 @@ fn bench_lamellae_with() -> Duration {
     }
 
     while tx.flush().is_err() {}
-    let _sum = consumer_handle.join().unwrap();
+    let sum = consumer_handle.join().unwrap();
+    let n = BATCH_SIZE as u64 * BATCH_COUNT;
+    assert_eq!(sum, (n * (n - 1)) / 2);
     start.elapsed()
 }
 
@@ -168,7 +174,7 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
     let total_bytes = BATCH_COUNT * BATCH_SIZE as u64 * std::mem::size_of::<Message>() as u64;
     group.throughput(Throughput::Bytes(total_bytes));
 
-    group.bench_function("rtrb Chunk Slices", |b| {
+    group.bench_function("rtrb Batched", |b| {
         b.iter_custom(|iters| {
             let mut total_duration = Duration::ZERO;
             for _ in 0..iters {
@@ -178,7 +184,7 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("Lamellae Zero-Copy Reservation", |b| {
+    group.bench_function("Lamellae Batched", |b| {
         b.iter_custom(|iters| {
             let mut total_duration = Duration::ZERO;
             for _ in 0..iters {
@@ -188,13 +194,24 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("Lamellae Batch With", |b| {
+        b.iter_custom(|iters| {
+            let mut total_duration = Duration::ZERO;
+            for _ in 0..iters {
+                total_duration += bench_lamellae_with();
+            }
+            total_duration
+        });
+    });
+
     group.finish();
 }
 
-fn main() {
-    let elapsed = bench_lamellae_with();
-    println!("elapsed: {}", elapsed.as_millis());
-}
+// fn main() {
+//     // let elapsed = bench_lamellae_batch();
+//     let elapsed = bench_lamellae_with();
+//     println!("elapsed: {}", elapsed.as_millis());
+// }
 
-// criterion_group!(benches, criterion_batched_benchmarks);
-// criterion_main!(benches);
+criterion_group!(benches, criterion_batched_benchmarks);
+criterion_main!(benches);

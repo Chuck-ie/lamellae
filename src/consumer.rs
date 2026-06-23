@@ -18,6 +18,7 @@ pub struct Consumer<T, const N: usize> {
 impl<T, const N: usize> Consumer<T, N> {
     pub(crate) fn new(buffer: &Arc<Buffer<T, N>>) -> Self {
         let curr_ptr = SlotPtr::from((buffer.cl_mask, N));
+
         Self {
             buffer: buffer.clone(),
             slot_ptr: curr_ptr,
@@ -105,7 +106,7 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         T: Copy,
     {
-        let size = self.validate_batch_size_exact(buf.len())?;
+        let size = self.validate_exact_batch_size(buf.len())?;
 
         // Safety: batch_size <= continuous which was verified readable above
         unsafe { self.recv_batch_exact_unchecked(buf) };
@@ -162,7 +163,7 @@ impl<T, const N: usize> Consumer<T, N> {
     where
         F: FnOnce(&[T], &[T]),
     {
-        let size = self.validate_batch_size_exact(size)?;
+        let size = self.validate_exact_batch_size(size)?;
 
         let (s1, s2) = unsafe { self.buffer.as_slice(self.slot_ptr, size) };
         with(s1, s2);
@@ -177,13 +178,16 @@ impl<T, const N: usize> Consumer<T, N> {
         Ok(size)
     }
 
-    fn continuous_used(&mut self) -> usize {
+    #[inline]
+    fn continuous_used(&self) -> usize {
+        self.buffer.flat_dist(self.slot_ptr, self.cached_cl_write)
+    }
+
+    fn refresh_used(&mut self) {
         self.try_extend_cached_cl_write();
 
-        let used = self.buffer.flat_dist(self.slot_ptr, self.cached_cl_write);
-
-        if used != 0 {
-            return used;
+        if self.continuous_used() != 0 {
+            return;
         }
 
         let (curr_cl_index, _) = self.slot_ptr.into();
@@ -191,13 +195,11 @@ impl<T, const N: usize> Consumer<T, N> {
         let curr_head = self.buffer.head.load(Ordering::Acquire);
 
         if next_cl_index == curr_head {
-            return 0;
+            return;
         }
 
         self.refresh_cached_cl_write(curr_head);
-
         self.slot_ptr.set(next_cl_index, 0);
-        self.buffer.flat_dist(self.slot_ptr, self.cached_cl_write)
     }
 
     fn try_extend_cached_cl_write(&mut self) {
@@ -226,19 +228,43 @@ impl<T, const N: usize> Consumer<T, N> {
     }
 
     fn clamp_batch_size(&mut self, requested: usize) -> Result<usize, Error> {
-        crate::buffer::clamp_batch_size(
-            requested,
-            self.buffer.max_size(),
-            self.continuous_used(),
-            Error::QueueEmpty,
-        )
+        let max_size = self.buffer.max_size();
+        let available = self.continuous_used();
+
+        if requested > available && requested <= max_size {
+            self.refresh_used();
+
+            return crate::buffer::clamp_batch_size(
+                requested,
+                max_size,
+                self.continuous_used(),
+                Error::QueueEmpty,
+            );
+        }
+
+        crate::buffer::clamp_batch_size(requested, max_size, available, Error::QueueEmpty)
     }
 
-    fn validate_batch_size_exact(&mut self, requested: usize) -> Result<usize, Error> {
+    fn validate_exact_batch_size(&mut self, requested: usize) -> Result<usize, Error> {
+        let max_size = self.buffer.max_size();
+        let available = self.continuous_used();
+
+        if requested > available && requested <= max_size {
+            self.refresh_used();
+
+            return crate::buffer::validate_exact_batch_size(
+                requested,
+                max_size,
+                self.continuous_used(),
+                Error::QueueEmpty,
+                Error::BatchTooLarge,
+            );
+        }
+
         crate::buffer::validate_exact_batch_size(
             requested,
-            self.buffer.max_size(),
-            self.continuous_used(),
+            max_size,
+            available,
             Error::QueueEmpty,
             Error::BatchTooLarge,
         )
@@ -299,6 +325,28 @@ mod consumer_tests {
             .try_recv_batch(&mut buf)
             .expect("batch should not be empty");
         assert_eq!(received, CL_CAPACITY / 2);
+    }
+
+    #[test]
+    fn test_batch_skips_past_interruption() {
+        let (mut tx, mut rx) = channel!(TestMessage, TOTAL_CAPACITY);
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY / 2]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        assert!(tx.try_send_batch(&[0; CL_CAPACITY]).is_ok());
+        assert!(tx.flush().is_ok());
+
+        let mut buf = [0usize; 2 * CL_CAPACITY];
+        let first = rx
+            .try_recv_batch(&mut buf)
+            .expect("first batch should not be empty");
+        assert_eq!(first, CL_CAPACITY / 2);
+
+        let second = rx
+            .try_recv_batch(&mut buf)
+            .expect("second batch should skip the gap and read the next segment");
+        assert_eq!(second, CL_CAPACITY);
     }
 
     #[test]

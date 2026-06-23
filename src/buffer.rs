@@ -19,6 +19,7 @@ pub struct Buffer<T, const N: usize> {
     pub(crate) interruptions: InterruptionTracker,
     pub(crate) cl_mask: usize,
     pub(crate) capacity: usize,
+    pub(crate) max_capacity: usize,
 }
 
 impl<T, const N: usize> Buffer<T, N> {
@@ -37,6 +38,7 @@ impl<T, const N: usize> Buffer<T, N> {
             interruptions: InterruptionTracker::new(),
             cl_mask: cache_line_mask,
             capacity,
+            max_capacity: capacity - N,
         });
 
         let producer = Producer::new(&buffer);
@@ -61,7 +63,7 @@ impl<T, const N: usize> Buffer<T, N> {
 
     #[inline]
     pub(crate) const fn max_size(&self) -> usize {
-        self.capacity - N
+        self.max_capacity
     }
 
     #[inline]
@@ -75,7 +77,7 @@ impl<T, const N: usize> Buffer<T, N> {
         let (curr_cl_index, curr_cl_offset) = (*slot_ptr).into();
         let from_abs_index = (curr_cl_index * N) + curr_cl_offset;
         let to_abs_index = from_abs_index + by;
-        let final_abs_index = to_abs_index % self.capacity;
+        let final_abs_index = to_abs_index & (self.capacity - 1);
 
         let cl_index = (final_abs_index / N) & self.cl_mask;
         let cl_offset = final_abs_index % N;
