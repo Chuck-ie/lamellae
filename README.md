@@ -15,7 +15,7 @@ A cache line becomes visible only when ownership of that cache line is released.
 - the producer advances to the next cache line after filling the current one
 - the producer explicitly calls `flush()`
 
-Once released, the consumer can read all messages contained within it. All that to say, visibilty is defined at cache line granularity rather
+Once released, the consumer can read all messages contained within it. All that to say, visibility is defined at cache line granularity rather
 than per message!
 
 ### When is lamellae a good fit?
