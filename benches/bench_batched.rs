@@ -4,14 +4,16 @@ use std::time::{Duration, Instant};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use lamellae::channel;
 
-// const BATCH_COUNT: u64 = 25_000_000;
+const BATCH_COUNT: u64 = 200_000_000;
+const BATCH_SIZE: usize = 16;
+// const BATCH_COUNT: u64 = 40_000;
 // const BATCH_SIZE: usize = 128;
-const BATCH_COUNT: u64 = 40_000;
-const BATCH_SIZE: usize = 128;
 // const BATCH_COUNT: u64 = 20_000;
 // const BATCH_SIZE: usize = 256;
 // const BATCH_COUNT: u64 = 10_000;
 // const BATCH_SIZE: usize = 512;
+// const BATCH_COUNT: u64 = 230_000;
+// const BATCH_SIZE: usize = 16;
 // const CAPACITY: usize = 16384;
 const CAPACITY: usize = 4096;
 
@@ -117,14 +119,8 @@ fn bench_lamellae_with() -> Duration {
 
         for _ in 0..BATCH_COUNT {
             while rx
-                .try_recv_exact_with(BATCH_SIZE, |s1, s2| {
-                    for i in s1 {
-                        sum += *i;
-                    }
-
-                    for i in s2 {
-                        sum += *i;
-                    }
+                .try_recv_exact_with(BATCH_SIZE, |_, val| {
+                    sum += *val;
                 })
                 .is_err()
             {
@@ -139,19 +135,7 @@ fn bench_lamellae_with() -> Duration {
 
     for batch in 0..BATCH_COUNT {
         while tx
-            .try_send_exact_with(BATCH_SIZE, |s1, s2| {
-                let mut sent_count: u64 = 0;
-
-                for val in s1 {
-                    *val = batch * BATCH_SIZE as u64 + sent_count;
-                    sent_count += 1;
-                }
-
-                for val in s2 {
-                    *val = batch * BATCH_SIZE as u64 + sent_count;
-                    sent_count += 1;
-                }
-            })
+            .try_send_exact_with(BATCH_SIZE, |i| batch * BATCH_SIZE as u64 + i as u64)
             .is_err()
         {
             thread::yield_now();
@@ -168,31 +152,34 @@ fn bench_lamellae_with() -> Duration {
 fn criterion_batched_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Batched Operations");
 
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(20));
+    group.sample_size(100);
 
     let total_bytes = BATCH_COUNT * BATCH_SIZE as u64 * std::mem::size_of::<Message>() as u64;
     group.throughput(Throughput::Bytes(total_bytes));
 
-    group.bench_function("rtrb Batched", |b| {
-        b.iter_custom(|iters| {
-            let mut total_duration = Duration::ZERO;
-            for _ in 0..iters {
-                total_duration += bench_rtrb_batch();
-            }
-            total_duration
-        });
-    });
-
-    group.bench_function("Lamellae Batched", |b| {
-        b.iter_custom(|iters| {
-            let mut total_duration = Duration::ZERO;
-            for _ in 0..iters {
-                total_duration += bench_lamellae_batch();
-            }
-            total_duration
-        });
-    });
+    // group.bench_function("rtrb Batched", |b| {
+    //     b.iter_custom(|iters| {
+    //         let mut total_duration = Duration::ZERO;
+    //         for _ in 0..iters {
+    //             total_duration += bench_rtrb_batch();
+    //         }
+    //         total_duration
+    //     });
+    // });
+    //
+    // group.bench_function("Lamellae Batched", |b| {
+    //     b.iter_custom(|iters| {
+    //         let mut total_duration = Duration::ZERO;
+    //         for _ in 0..iters {
+    //             total_duration += bench_lamellae_batch();
+    //         }
+    //         total_duration
+    //     });
+    // });
+    //
+    // group.measurement_time(Duration::from_secs(40));
 
     group.bench_function("Lamellae Batch With", |b| {
         b.iter_custom(|iters| {
@@ -207,11 +194,11 @@ fn criterion_batched_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-// fn main() {
-//     // let elapsed = bench_lamellae_batch();
-//     let elapsed = bench_lamellae_with();
-//     println!("elapsed: {}", elapsed.as_millis());
-// }
+fn main() {
+    // let elapsed = bench_lamellae_batch();
+    let elapsed = bench_lamellae_with();
+    println!("elapsed: {}", elapsed.as_millis());
+}
 
-criterion_group!(benches, criterion_batched_benchmarks);
-criterion_main!(benches);
+// criterion_group!(benches, criterion_batched_benchmarks);
+// criterion_main!(benches);

@@ -120,7 +120,7 @@ impl<T, const N: usize> Producer<T, N> {
 
     pub fn try_send_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
     where
-        F: FnOnce(&mut [T], &mut [T]),
+        F: FnMut(usize) -> T,
     {
         let size = self.clamp_batch_size(size)?;
 
@@ -129,7 +129,7 @@ impl<T, const N: usize> Producer<T, N> {
 
     pub fn try_send_exact_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
     where
-        F: FnOnce(&mut [T], &mut [T]),
+        F: FnMut(usize) -> T,
     {
         let size = self.validate_exact_batch_size(size)?;
 
@@ -140,12 +140,22 @@ impl<T, const N: usize> Producer<T, N> {
     ///
     /// The caller has to make sure that size fits into the buffer and that size amount of slots
     /// are free for writing. Otherwise this function causes UB
-    unsafe fn send_exact_with<F>(&mut self, size: usize, with: F) -> usize
+    unsafe fn send_exact_with<F>(&mut self, size: usize, mut with: F) -> usize
     where
-        F: FnOnce(&mut [T], &mut [T]),
+        F: FnMut(usize) -> T,
     {
         let (s1, s2) = unsafe { self.buffer.as_slice_mut(self.slot_ptr, size) };
-        with(s1, s2);
+        let mut total_sent = 0;
+
+        for val in s1 {
+            *val = with(total_sent);
+            total_sent += 1;
+        }
+
+        for val in s2 {
+            *val = with(total_sent);
+            total_sent += 1;
+        }
 
         self.buffer.advance_slot_ptr(
             &mut self.slot_ptr,

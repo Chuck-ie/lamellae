@@ -142,31 +142,38 @@ impl<T, const N: usize> Consumer<T, N> {
 
     pub fn try_recv_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
     where
-        F: FnOnce(&[T], &[T]),
+        F: FnMut(usize, &T),
     {
         let size = self.clamp_batch_size(size)?;
 
-        let (s1, s2) = unsafe { self.buffer.as_slice(self.slot_ptr, size) };
-        with(s1, s2);
-
-        self.buffer.advance_slot_ptr(
-            &mut self.slot_ptr,
-            size,
-            &self.buffer.tail,
-            Ordering::Release,
-        );
-
-        Ok(size)
+        Ok(unsafe { self.recv_exact_with(size, with) })
     }
 
     pub fn try_recv_exact_with<F>(&mut self, size: usize, with: F) -> Result<usize, Error>
     where
-        F: FnOnce(&[T], &[T]),
+        F: FnMut(usize, &T),
     {
         let size = self.validate_exact_batch_size(size)?;
 
+        Ok(unsafe { self.recv_exact_with(size, with) })
+    }
+
+    unsafe fn recv_exact_with<F>(&mut self, size: usize, mut with: F) -> usize
+    where
+        F: FnMut(usize, &T),
+    {
         let (s1, s2) = unsafe { self.buffer.as_slice(self.slot_ptr, size) };
-        with(s1, s2);
+        let mut total_sent = 0;
+
+        for slot in s1 {
+            with(total_sent, slot);
+            total_sent += 1;
+        }
+
+        for slot in s2 {
+            with(total_sent, slot);
+            total_sent += 1;
+        }
 
         self.buffer.advance_slot_ptr(
             &mut self.slot_ptr,
@@ -175,7 +182,7 @@ impl<T, const N: usize> Consumer<T, N> {
             Ordering::Release,
         );
 
-        Ok(size)
+        size
     }
 
     #[inline]
