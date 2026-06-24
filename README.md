@@ -1,5 +1,5 @@
 ## lamellae
-lamellae is *YET ANOTHER* wait-free single-producer single-consumer queue (SPSC) implementation in Rust, built around a 
+lamellae is *YET ANOTHER and **quite unusual*** wait-free single-producer single-consumer queue (SPSC) implementation in Rust, built around a 
 cache-line-partitioned ring buffer designed to minimize contention and false sharing between producer and consumer threads.
 
 ### Why the name?
@@ -15,7 +15,7 @@ A cache line becomes visible only when ownership of that cache line is released.
 - the producer advances to the next cache line after filling the current one
 - the producer explicitly calls `flush()`
 
-Once released, the consumer can read all messages contained within it. All that to say, visibility is defined at cache line granularity rather
+Once released, the consumer can read all messages contained within it. All that to say, visibilty is defined at cache line granularity rather
 than per message!
 
 ### When is lamellae a good fit?
@@ -58,7 +58,7 @@ for i in 0..8 {
 assert!(rx.try_recv().is_err());
 ```
 
-#### Explicit publication with `flush()`
+#### Explicit publication via `flush()`
 ```rust
 let (mut tx, mut rx) = lamellae::channel!(u64, 1024);
 
