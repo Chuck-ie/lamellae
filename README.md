@@ -17,13 +17,13 @@ Once released, the consumer can read all messages contained within it. All that 
 than per message!
 
 ### When is lamellae a good fit?
-- workloads with natural batching, where per-message visibility is not required
+- workloads with natural batching, where per message visibility is not required
 - high throughput pipelines where sustained throughput matters more than individual message latency
 - bursty producers where cache-line amortization improves efficiency
 
 ### When is lamellae NOT a good fit?
 - systems that require each message to be immediately visible to the consumer
 - latency-sensitive pipelines where visibility delay is unacceptable
-- APIs that assume per message queue semantics rather than buffered/cache-line windows
+- APIs that assume per message queue semantics rather than buffered/cache line windows
 
 TLDR: if you want “send == immediate visible”, this is not that kind of queue and you should probably look at other queues like rtrb for example :p
